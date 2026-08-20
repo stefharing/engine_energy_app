@@ -4,7 +4,7 @@ import 'package:url_launcher/url_launcher.dart';
 import '../data/planning_repository.dart';
 import '../models/job_order.dart';
 import 'declarations_screen.dart';
-import 'hours_registration_screen.dart';
+import 'hours_week_screen.dart';
 import 'parts_list_screen.dart';
 import 'relation_detail_screen.dart';
 import 'service_object_detail_screen.dart';
@@ -227,7 +227,7 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
   void _openHoursRegistration() {
     Navigator.of(context).push(
       CupertinoPageRoute<void>(
-        builder: (_) => HoursRegistrationScreen(order: widget.order),
+        builder: (_) => HoursWeekScreen(order: widget.order),
       ),
     );
   }

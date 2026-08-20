@@ -3,9 +3,9 @@ import 'package:flutter/material.dart' show DefaultMaterialLocalizations;
 
 import 'core/auth/auth_service.dart';
 import 'features/planning/screens/planning_screen.dart';
-import 'features/service_remote/screens/job_orders_screen.dart';
 import 'screens/dashboard_screen.dart';
 import 'screens/login_screen.dart';
+import 'screens/projecten_screen.dart';
 
 void main() {
   runApp(const EngineEnergyApp());
@@ -93,7 +93,7 @@ class MainTabView extends StatelessWidget {
           case 1:
             return const PlanningScreen();
           case 2:
-            return const JobOrdersScreen();
+            return const ProjectenScreen();
           default:
             return const DashboardScreen();
         }

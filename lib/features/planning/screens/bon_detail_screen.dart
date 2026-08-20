@@ -8,7 +8,7 @@ import '../../../core/api/api_client.dart';
 import '../data/planning_repository.dart';
 import '../models/job_order.dart';
 import 'declarations_screen.dart';
-import 'hours_registration_screen.dart';
+import 'hours_week_screen.dart';
 import 'parts_list_screen.dart';
 
 // ─── Screen ────────────────────────────────────────────────────────────────────
@@ -58,7 +58,14 @@ class _BonDetailScreenState extends State<BonDetailScreen> {
   int get _aantalOpenPick =>
       _parts.where((p) => !_takenIds.contains(p['id'].toString())).length;
 
-  double get _totalUrenGeregistreerd => _projectTimes.fold(0.0, (sum, p) {
+  /// Locally-submitted total from this session's [HoursWeekScreen] run, if
+  /// any — shown in preference to [_projectTimesTotal] right after a
+  /// successful submit, since that v2 query (`/hours/projecttimes`) reads a
+  /// different table than the v1 `hours[]` write and won't reflect it until
+  /// Ridder's office-side processing (if ever) syncs the two.
+  double? _optimisticHoursOverride;
+
+  double get _projectTimesTotal => _projectTimes.fold(0.0, (sum, p) {
     final s = p['timeemployee'] as String?;
     if (s == null) return sum;
     final parts = s.split(':');
@@ -67,6 +74,9 @@ class _BonDetailScreenState extends State<BonDetailScreen> {
     final minutes = int.tryParse(parts[1]) ?? 0;
     return sum + hours + minutes / 60;
   });
+
+  double get _totalUrenGeregistreerd =>
+      _optimisticHoursOverride ?? _projectTimesTotal;
 
   @override
   void initState() {
@@ -257,6 +267,18 @@ class _BonDetailScreenState extends State<BonDetailScreen> {
     if (refreshHours && mounted) _loadHours();
   }
 
+  Future<void> _openHoursWeek() async {
+    final submittedTotal = await Navigator.of(context).push<double>(
+      CupertinoPageRoute<double>(
+        builder: (_) => HoursWeekScreen(order: _order),
+      ),
+    );
+    if (submittedTotal != null && mounted) {
+      setState(() => _optimisticHoursOverride = submittedTotal);
+    }
+    if (mounted) _loadHours();
+  }
+
   void _showComingSoon(String feature) {
     showCupertinoDialog(
       context: context,
@@ -411,10 +433,7 @@ class _BonDetailScreenState extends State<BonDetailScreen> {
                         PartsListScreen(order: order),
                         refreshParts: true,
                       ),
-                      onUren: () => _push(
-                        HoursRegistrationScreen(order: order),
-                        refreshHours: true,
-                      ),
+                      onUren: _openHoursWeek,
                       onExtra: () => _push(
                         PartsListScreen(order: order),
                         refreshParts: true,

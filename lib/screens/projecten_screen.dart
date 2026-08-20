@@ -424,29 +424,32 @@ class _OrderCard extends StatelessWidget {
               ),
             ],
 
-            if (order.relationName.isNotEmpty) ...[
+            if (order.relationName.isNotEmpty || order.orderNumber.isNotEmpty) ...[
               const SizedBox(height: 10),
               Row(
                 children: [
-                  Icon(
-                    CupertinoIcons.person_2,
-                    size: 13,
-                    color: CupertinoColors.secondaryLabel.resolveFrom(context),
-                  ),
-                  const SizedBox(width: 4),
-                  Expanded(
-                    child: Text(
-                      order.relationName,
-                      style: TextStyle(
-                        fontSize: 13,
-                        color: CupertinoColors.secondaryLabel.resolveFrom(
-                          context,
-                        ),
-                      ),
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
+                  if (order.relationName.isNotEmpty) ...[
+                    Icon(
+                      CupertinoIcons.person_2,
+                      size: 13,
+                      color: CupertinoColors.secondaryLabel.resolveFrom(context),
                     ),
-                  ),
+                    const SizedBox(width: 4),
+                    Expanded(
+                      child: Text(
+                        order.relationName,
+                        style: TextStyle(
+                          fontSize: 13,
+                          color: CupertinoColors.secondaryLabel.resolveFrom(
+                            context,
+                          ),
+                        ),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                  ] else
+                    const Spacer(),
                   if (order.orderNumber.isNotEmpty) ...[
                     const SizedBox(width: 12),
                     Text(

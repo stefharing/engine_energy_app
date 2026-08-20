@@ -137,7 +137,8 @@
       "Bash(flutter test *)",
       "Bash(flutter run *)",
       "Bash(osascript -e 'tell application \"engine_energy_app\" to activate')",
-      "Bash(open -a \"/Users/stefharing/Documents/engine_energy/areas/engine_energy_app/build/macos/Build/Products/Debug/engine_energy_app.app\")"
+      "Bash(open -a \"/Users/stefharing/Documents/engine_energy/areas/engine_energy_app/build/macos/Build/Products/Debug/engine_energy_app.app\")",
+      "Bash(grep -n \"^class HoursWeekScreen\\\\|^}$\" /Users/stefharing/Documents/engine_energy/areas/engine_energy_app/lib/features/planning/screens/hours_week_screen.dart)"
     ]
   }
 }
