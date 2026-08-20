@@ -515,13 +515,13 @@ class _AddHourFab extends StatelessWidget {
         decoration: BoxDecoration(
           color: CupertinoColors.activeBlue,
           shape: BoxShape.circle,
-          boxShadow: [
-            BoxShadow(
-              color: CupertinoColors.activeBlue.withValues(alpha: 0.35),
-              blurRadius: 14,
-              offset: const Offset(0, 6),
-            ),
-          ],
+          // boxShadow: [
+          //   BoxShadow(
+          //     color: CupertinoColors.activeBlue.withValues(alpha: 0.35),
+          //     blurRadius: 14,
+          //     offset: const Offset(0, 6),
+          //   ),
+          // ],
         ),
         child: const Icon(
           CupertinoIcons.add,
@@ -895,7 +895,7 @@ class _EmptyCardsHint extends StatelessWidget {
         decoration: BoxDecoration(
           color: tint.withValues(alpha: isDark ? 0.10 : 0.06),
           borderRadius: BorderRadius.circular(16),
-          border: Border.all(color: tint.withValues(alpha: 0.3), width: 1),
+          // border: Border.all(color: tint.withValues(alpha: 0.3), width: 1),
         ),
         child: Column(
           mainAxisSize: MainAxisSize.min,

@@ -10,6 +10,7 @@ import '../models/job_order.dart';
 import 'declarations_screen.dart';
 import 'hours_week_screen.dart';
 import 'parts_list_screen.dart';
+import 'work_report_screen.dart';
 
 // ─── Screen ────────────────────────────────────────────────────────────────────
 
@@ -440,6 +441,7 @@ class _BonDetailScreenState extends State<BonDetailScreen> {
                       ),
                       onDeclaraties: () =>
                           _push(DeclarationsScreen(order: order)),
+                      onRapport: () => _push(WorkReportScreen(order: order)),
                       onTekenen: () => _showComingSoon('Klantgoedkeuring'),
                     ),
                   ),
@@ -700,6 +702,7 @@ class _TaskGrid extends StatelessWidget {
   final VoidCallback onUren;
   final VoidCallback onExtra;
   final VoidCallback onDeclaraties;
+  final VoidCallback onRapport;
   final VoidCallback onTekenen;
 
   const _TaskGrid({
@@ -711,6 +714,7 @@ class _TaskGrid extends StatelessWidget {
     required this.onUren,
     required this.onExtra,
     required this.onDeclaraties,
+    required this.onRapport,
     required this.onTekenen,
   });
 
@@ -782,7 +786,7 @@ class _TaskGrid extends StatelessWidget {
         subtitle: 'Schrijf een servicerapport',
         done: false,
         locked: false,
-        onTap: () {},
+        onTap: onRapport,
       ),
       _TaskItem(
         iconBg: const Color(0xFFE6F9EC),

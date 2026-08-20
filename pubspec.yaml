@@ -43,6 +43,8 @@ dependencies:
     google_mlkit_text_recognition: ^0.15.0
     receipt_recognition: ^0.2.8
     camera: ^0.12.0+1
+    path_provider: ^2.1.6
+    file_picker: ^11.0.3
 
 dev_dependencies:
     flutter_test:
