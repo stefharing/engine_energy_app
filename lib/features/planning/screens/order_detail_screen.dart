@@ -227,7 +227,7 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
   void _openHoursRegistration() {
     Navigator.of(context).push(
       CupertinoPageRoute<void>(
-        builder: (_) => HoursWeekScreen(order: widget.order),
+        builder: (_) => HoursWeekScreen(initialOrder: widget.order),
       ),
     );
   }
@@ -267,15 +267,18 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
 
     return CupertinoPageScaffold(
       navigationBar: CupertinoNavigationBar(
-        backgroundColor: CupertinoColors.systemBackground,
+        backgroundColor: CupertinoColors.white,
         border: null,
         leading: CupertinoNavigationBarBackButton(
-          color: CupertinoColors.label.resolveFrom(context),
+          color: CupertinoColors.black,
           onPressed: () => Navigator.of(context).pop(),
         ),
         middle: Text(
           order.orderNumber.isNotEmpty ? order.orderNumber : 'Order',
-          style: const TextStyle(fontWeight: FontWeight.w600),
+          style: const TextStyle(
+            fontWeight: FontWeight.w600,
+            color: CupertinoColors.black,
+          ),
         ),
       ),
       child: SafeArea(

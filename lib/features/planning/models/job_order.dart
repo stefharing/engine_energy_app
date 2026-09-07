@@ -44,6 +44,7 @@ class ServiceOrder implements PlanningItem {
   final String workflowState;
   final ServicePerson? mechanic;
   final String serviceObjectTag;
+  final String serviceObjectDescription;
   final String serviceType;
   final String location;
   final String relationName;
@@ -62,6 +63,7 @@ class ServiceOrder implements PlanningItem {
     required this.workflowState,
     required this.mechanic,
     required this.serviceObjectTag,
+    required this.serviceObjectDescription,
     required this.serviceType,
     required this.location,
     required this.relationName,
@@ -91,6 +93,7 @@ class ServiceOrder implements PlanningItem {
       workflowState: stateJson?['state'] as String? ?? 'Nieuw',
       mechanic: mechJson != null ? ServicePerson.fromJson(mechJson) : null,
       serviceObjectTag: objectJson?['recordtag'] as String? ?? '',
+      serviceObjectDescription: objectJson?['description'] as String? ?? '',
       serviceType: typeJson?['description'] as String? ?? '',
       location:
           locationJson?['name'] as String? ??
@@ -117,6 +120,7 @@ class ServiceOrder implements PlanningItem {
     workflowState: workflowState,
     mechanic: mechanic,
     serviceObjectTag: serviceObjectTag,
+    serviceObjectDescription: serviceObjectDescription,
     serviceType: serviceType,
     location: location,
     relationName: relationName ?? this.relationName,

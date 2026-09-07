@@ -18,7 +18,7 @@ class EngineEnergyApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return const CupertinoApp(
       title: 'Engine Energy',
-      theme: CupertinoThemeData(),
+      theme: CupertinoThemeData(barBackgroundColor: CupertinoColors.white),
       localizationsDelegates: [
         DefaultMaterialLocalizations.delegate,
         DefaultCupertinoLocalizations.delegate,

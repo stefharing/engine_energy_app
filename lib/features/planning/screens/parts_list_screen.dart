@@ -502,11 +502,11 @@ class _PartsListScreenState extends State<PartsListScreen> {
     return CupertinoPageScaffold(
       backgroundColor: isDark ? CupertinoColors.black : const Color(0xFFF2F2F7),
       navigationBar: CupertinoNavigationBar(
-        backgroundColor: CupertinoColors.systemBackground,
+        backgroundColor: CupertinoColors.white,
         border: null,
         padding: const EdgeInsetsDirectional.only(start: 4),
         leading: CupertinoNavigationBarBackButton(
-          color: CupertinoColors.label,
+          color: CupertinoColors.black,
           onPressed: () => Navigator.of(context).pop(),
         ),
         middle: AnimatedOpacity(
@@ -514,7 +514,10 @@ class _PartsListScreenState extends State<PartsListScreen> {
           duration: const Duration(milliseconds: 150),
           child: const Text(
             'Artikelen picken',
-            style: TextStyle(fontWeight: FontWeight.w600),
+            style: TextStyle(
+              fontWeight: FontWeight.w600,
+              color: CupertinoColors.black,
+            ),
           ),
         ),
       ),

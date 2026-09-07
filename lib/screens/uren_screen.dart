@@ -9,7 +9,7 @@ class UrenScreen extends StatelessWidget {
   Widget build(BuildContext context) {
     return const CupertinoPageScaffold(
       navigationBar: CupertinoNavigationBar(
-        backgroundColor: CupertinoColors.systemBackground,
+        backgroundColor: CupertinoColors.white,
         border: null,
         padding: EdgeInsetsDirectional.symmetric(horizontal: 20),
         middle: EngineLogo(),

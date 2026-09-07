@@ -106,15 +106,18 @@ class _ServiceObjectDetailScreenState extends State<ServiceObjectDetailScreen> {
 
     return CupertinoPageScaffold(
       navigationBar: CupertinoNavigationBar(
-        backgroundColor: CupertinoColors.systemBackground,
+        backgroundColor: CupertinoColors.white,
         border: null,
         leading: CupertinoNavigationBarBackButton(
-          color: CupertinoColors.label.resolveFrom(context),
+          color: CupertinoColors.black,
           onPressed: () => Navigator.of(context).pop(),
         ),
         middle: Text(
           widget.name.isNotEmpty ? widget.name : 'Service object',
-          style: const TextStyle(fontWeight: FontWeight.w600),
+          style: const TextStyle(
+            fontWeight: FontWeight.w600,
+            color: CupertinoColors.black,
+          ),
         ),
       ),
       child: SafeArea(

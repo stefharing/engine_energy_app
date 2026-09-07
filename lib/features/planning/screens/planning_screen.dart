@@ -230,7 +230,7 @@ class _PlanningScreenState extends State<PlanningScreen> {
             padding: EdgeInsets.all(10),
             child: Icon(
               CupertinoIcons.ellipsis,
-              color: CupertinoColors.label,
+              color: CupertinoColors.black,
               size: 18,
             ),
           ),

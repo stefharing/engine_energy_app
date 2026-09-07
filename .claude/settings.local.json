@@ -138,7 +138,24 @@
       "Bash(flutter run *)",
       "Bash(osascript -e 'tell application \"engine_energy_app\" to activate')",
       "Bash(open -a \"/Users/stefharing/Documents/engine_energy/areas/engine_energy_app/build/macos/Build/Products/Debug/engine_energy_app.app\")",
-      "Bash(grep -n \"^class HoursWeekScreen\\\\|^}$\" /Users/stefharing/Documents/engine_energy/areas/engine_energy_app/lib/features/planning/screens/hours_week_screen.dart)"
+      "Bash(grep -n \"^class HoursWeekScreen\\\\|^}$\" /Users/stefharing/Documents/engine_energy/areas/engine_energy_app/lib/features/planning/screens/hours_week_screen.dart)",
+      "Bash(xargs ls -la)",
+      "Bash(flutter --version)",
+      "Bash(echo \"started with pid $!\")",
+      "Bash(sleep 2; cat /tmp/flutter_run.log 2>&1 | tail -60; echo \"---procs---\"; ps aux | grep -i \"flutter run\" | grep -v grep)",
+      "Bash(osascript -e 'tell application \"System Events\" to \\(name of processes\\) contains \"engine_energy_app\"')",
+      "Bash(osascript -e 'tell application \"System Events\" to get name of every process whose name contains \"engine\"')",
+      "Bash(osascript -e 'tell application \"System Events\" to tell process \"engine_energy_app\" to set frontmost to true')",
+      "Bash(mkdir -p /tmp/ee_screens)",
+      "Bash(screencapture -x /tmp/ee_screens/01_launch.png)",
+      "Bash(osascript -e ' *)",
+      "Bash(xargs -I{} echo {})",
+      "Bash(pkill -f \"flutter run -d macos\")",
+      "Bash(pkill -f \"engine_energy_app.app\")",
+      "Bash(osascript -e 'tell application \"engine_energy_app\" to quit')",
+      "Bash(rm -f /tmp/flutter_run.log)",
+      "Bash(rm -rf /tmp/ee_screens)",
+      "Bash(grep -n 'Stap \\\\|StepProgress\\\\|van $total\\\\|—' test/features/planning/screens/work_report_screen_test.dart)"
     ]
   }
 }

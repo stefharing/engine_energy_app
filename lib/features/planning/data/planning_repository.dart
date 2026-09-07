@@ -265,6 +265,46 @@ class PlanningRepository {
     }
   }
 
+  /// The maintenance intervals configured for a service object (e.g.
+  /// "every 6 months", "every 90 days") — used to compute the next
+  /// upcoming maintenance date. Returns an empty list on failure so callers
+  /// can treat "no data" and "fetch failed" the same way (silently hide the
+  /// "Volgend onderhoud" row).
+  Future<List<Map<String, dynamic>>> fetchServiceIntervals(
+    String serviceObjectId,
+  ) async {
+    try {
+      final response = await _dio.get(
+        '/service/serviceintervals',
+        queryParameters: {
+          'page': 1,
+          'size': 200,
+          'filter': 'serviceobject.id[eq]$serviceObjectId',
+        },
+      );
+      final data = response.data['data'] as List<dynamic>?;
+      if (data == null) return [];
+      return data.cast<Map<String, dynamic>>();
+    } catch (_) {
+      return [];
+    }
+  }
+
+  /// Number of documents attached to a service object. Returns null on
+  /// failure (as opposed to 0), so callers can tell "no documents" apart
+  /// from "couldn't load" and hide the row rather than show a wrong count.
+  Future<int?> fetchServiceObjectDocumentCount(String serviceObjectId) async {
+    try {
+      final response = await _dio.get(
+        '/service/serviceobjects/$serviceObjectId/documents',
+      );
+      final data = response.data['data'] as List<dynamic>?;
+      return data?.length;
+    } catch (_) {
+      return null;
+    }
+  }
+
   Future<Map<String, dynamic>?> fetchServiceContract(String id) async {
     try {
       final response = await _dio.get('/service/servicecontracts/$id');

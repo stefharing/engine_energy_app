@@ -4,6 +4,7 @@ import 'package:flutter/cupertino.dart';
 import '../core/api/api_client.dart';
 import '../core/auth/auth_service.dart';
 import '../core/auth/current_user.dart';
+import '../features/planning/screens/hours_week_screen.dart';
 import '../widgets/engine_logo.dart';
 import '../widgets/nav_border.dart';
 
@@ -125,6 +126,13 @@ class _DashboardScreenState extends State<DashboardScreen> {
   String _fmtHours(double h) =>
       h == h.truncateToDouble() ? h.toInt().toString() : h.toStringAsFixed(1);
 
+  Future<void> _openHoursWeek() async {
+    await Navigator.of(
+      context,
+    ).push(CupertinoPageRoute<double>(builder: (_) => const HoursWeekScreen()));
+    if (mounted) _load();
+  }
+
   @override
   Widget build(BuildContext context) {
     final isDark = CupertinoTheme.brightnessOf(context) == Brightness.dark;
@@ -216,7 +224,14 @@ class _DashboardScreenState extends State<DashboardScreen> {
               color: CupertinoColors.systemGrey,
             ),
           ),
-          const SizedBox(height: 40),
+          const SizedBox(height: 20),
+          _ActionCard(
+            label: 'Uren & km registreren',
+            icon: CupertinoIcons.timer,
+            isDark: isDark,
+            onTap: _openHoursWeek,
+          ),
+          const SizedBox(height: 24),
           Center(
             child: _RingChart(
               bookedHours: _weekHours,
@@ -249,6 +264,55 @@ class _DashboardScreenState extends State<DashboardScreen> {
             isDark: isDark,
           ),
         ],
+      ),
+    );
+  }
+}
+
+class _ActionCard extends StatelessWidget {
+  final String label;
+  final IconData icon;
+  final bool isDark;
+  final VoidCallback onTap;
+
+  const _ActionCard({
+    required this.label,
+    required this.icon,
+    required this.isDark,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final bg = isDark ? const Color(0xFF1C1C1E) : CupertinoColors.systemBackground;
+    final borderColor = isDark ? const Color(0xFF38383A) : const Color(0xFFE5E5EA);
+    return GestureDetector(
+      onTap: onTap,
+      behavior: HitTestBehavior.opaque,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+        decoration: BoxDecoration(
+          color: bg,
+          borderRadius: BorderRadius.circular(14),
+          border: Border.all(color: borderColor, width: 1),
+        ),
+        child: Row(
+          children: [
+            Icon(icon, size: 18, color: const Color(0xFFFF6B2B)),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Text(
+                label,
+                style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w500),
+              ),
+            ),
+            Icon(
+              CupertinoIcons.chevron_right,
+              size: 14,
+              color: CupertinoColors.tertiaryLabel.resolveFrom(context),
+            ),
+          ],
+        ),
       ),
     );
   }

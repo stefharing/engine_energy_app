@@ -194,15 +194,18 @@ class _MagazijnSearchScreenState extends State<MagazijnSearchScreen> {
 
     return CupertinoPageScaffold(
       navigationBar: CupertinoNavigationBar(
-        backgroundColor: CupertinoColors.systemBackground,
+        backgroundColor: CupertinoColors.white,
         border: null,
         leading: CupertinoNavigationBarBackButton(
-          color: CupertinoColors.label.resolveFrom(context),
+          color: CupertinoColors.black,
           onPressed: () => Navigator.of(context).pop(),
         ),
         middle: const Text(
           'Uit magazijn',
-          style: TextStyle(fontWeight: FontWeight.w600),
+          style: TextStyle(
+            fontWeight: FontWeight.w600,
+            color: CupertinoColors.black,
+          ),
         ),
       ),
       child: SafeArea(

@@ -7,6 +7,7 @@ import 'package:url_launcher/url_launcher.dart';
 import '../../../core/api/api_client.dart';
 import '../data/planning_repository.dart';
 import '../models/job_order.dart';
+import '../models/service_interval.dart';
 import 'declarations_screen.dart';
 import 'hours_week_screen.dart';
 import 'parts_list_screen.dart';
@@ -271,7 +272,7 @@ class _BonDetailScreenState extends State<BonDetailScreen> {
   Future<void> _openHoursWeek() async {
     final submittedTotal = await Navigator.of(context).push<double>(
       CupertinoPageRoute<double>(
-        builder: (_) => HoursWeekScreen(order: _order),
+        builder: (_) => HoursWeekScreen(initialOrder: _order),
       ),
     );
     if (submittedTotal != null && mounted) {
@@ -314,11 +315,11 @@ class _BonDetailScreenState extends State<BonDetailScreen> {
     return CupertinoPageScaffold(
       backgroundColor: isDark ? CupertinoColors.black : const Color(0xFFF2F2F7),
       navigationBar: CupertinoNavigationBar(
-        backgroundColor: CupertinoColors.systemBackground,
+        backgroundColor: CupertinoColors.white,
         border: null,
         padding: const EdgeInsetsDirectional.only(start: 4),
         leading: CupertinoNavigationBarBackButton(
-          color: CupertinoColors.label,
+          color: CupertinoColors.black,
           onPressed: () => Navigator.of(context).pop(),
         ),
         middle: AnimatedOpacity(
@@ -326,7 +327,10 @@ class _BonDetailScreenState extends State<BonDetailScreen> {
           duration: const Duration(milliseconds: 150),
           child: Text(
             title,
-            style: const TextStyle(fontWeight: FontWeight.w600),
+            style: const TextStyle(
+              fontWeight: FontWeight.w600,
+              color: CupertinoColors.black,
+            ),
           ),
         ),
       ),
@@ -477,6 +481,20 @@ class _BonDetailScreenState extends State<BonDetailScreen> {
                     ],
                   ),
                 ),
+
+                // ── Object ────────────────────────────────────────────────
+                if (order.serviceObjectId != null) ...[
+                  const SliverToBoxAdapter(child: SizedBox(height: 20)),
+                  SliverToBoxAdapter(child: _SectionLabel('Object')),
+                  SliverToBoxAdapter(
+                    child: _ObjectSection(
+                      order: order,
+                      cardBg: cardBg,
+                      border: border,
+                      onShowComingSoon: _showComingSoon,
+                    ),
+                  ),
+                ],
 
                 // ── Adres & contact ───────────────────────────────────────
                 if (order.location.isNotEmpty) ...[
@@ -1114,6 +1132,206 @@ class _NavRow extends StatelessWidget {
           ],
         ),
       ),
+    );
+  }
+}
+
+// ─── Object section ──────────────────────────────────────────────────────────
+
+/// The "Object" card on the bon detail screen — the service object (e.g. a
+/// motor or ketel) linked to this klus. The header renders instantly from
+/// data already present on [order] (no extra call); the rest of the card
+/// (objectnr/serienr, locatie, garantie) comes from a single
+/// `/service/serviceobjects/{id}` call fired in [initState], so it only
+/// happens once this section is actually being rendered — not for every
+/// order in a list. "Volgend onderhoud" and the document count are lazier
+/// still: fetched after the first frame, so they never hold up this
+/// section's own initial paint either.
+class _ObjectSection extends StatefulWidget {
+  final ServiceOrder order;
+  final Color cardBg;
+  final Color border;
+  final ValueChanged<String> onShowComingSoon;
+
+  const _ObjectSection({
+    required this.order,
+    required this.cardBg,
+    required this.border,
+    required this.onShowComingSoon,
+  });
+
+  @override
+  State<_ObjectSection> createState() => _ObjectSectionState();
+}
+
+class _ObjectSectionState extends State<_ObjectSection> {
+  static const _months = [
+    '',
+    'jan',
+    'feb',
+    'mrt',
+    'apr',
+    'mei',
+    'jun',
+    'jul',
+    'aug',
+    'sep',
+    'okt',
+    'nov',
+    'dec',
+  ];
+
+  Map<String, dynamic>? _detail;
+  bool _detailLoading = true;
+
+  List<Map<String, dynamic>>? _intervals;
+  int? _documentCount;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadDetail();
+    // Deferred to after the first frame is painted, so these two calls
+    // fire once this section is actually visible rather than as part of
+    // the screen's initial load.
+    WidgetsBinding.instance.addPostFrameCallback((_) => _loadLazyExtras());
+  }
+
+  Future<void> _loadDetail() async {
+    final detail = await PlanningRepository.instance.fetchServiceObject(
+      widget.order.serviceObjectId!,
+    );
+    if (mounted) {
+      setState(() {
+        _detail = detail;
+        _detailLoading = false;
+      });
+    }
+  }
+
+  Future<void> _loadLazyExtras() async {
+    final id = widget.order.serviceObjectId!;
+    final results = await Future.wait([
+      PlanningRepository.instance.fetchServiceIntervals(id),
+      PlanningRepository.instance.fetchServiceObjectDocumentCount(id),
+    ]);
+    if (!mounted) return;
+    setState(() {
+      _intervals = results[0] as List<Map<String, dynamic>>;
+      _documentCount = results[1] as int?;
+    });
+  }
+
+  String _fmtDate(DateTime? d) {
+    if (d == null) return '—';
+    return '${d.day} ${_months[d.month]} ${d.year}';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final order = widget.order;
+    final detail = _detail;
+    final title = order.serviceObjectDescription.isNotEmpty
+        ? order.serviceObjectDescription
+        : order.serviceObjectTag;
+
+    final objectNumber = detail?['objectnumber']?.toString() ?? '';
+    final serialNumber = detail?['serialnumber']?.toString() ?? '';
+    final subtitle = [
+      if (objectNumber.isNotEmpty) 'Objectnr. $objectNumber',
+      if (serialNumber.isNotEmpty) 'Serienr. $serialNumber',
+    ].join(' · ');
+
+    final objectLocationJson =
+        detail?['objectlocation'] as Map<String, dynamic>?;
+    final objectLocationName =
+        objectLocationJson?['name'] as String? ??
+        objectLocationJson?['code'] as String? ??
+        '';
+    final showLocation =
+        objectLocationName.trim().isNotEmpty &&
+        objectLocationName.trim().toLowerCase() !=
+            order.location.trim().toLowerCase();
+
+    final warrantyDate = parseServiceApiDate(detail?['ourwarrantydate']);
+    final nextMaintenance = _intervals != null
+        ? nextMaintenanceDateFrom(_intervals!)
+        : null;
+
+    return _InfoCard(
+      bg: widget.cardBg,
+      border: widget.border,
+      children: [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(20, 14, 20, 14),
+          child: Row(
+            children: [
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      title,
+                      style: TextStyle(
+                        fontSize: 16,
+                        fontWeight: FontWeight.w600,
+                        color: CupertinoColors.label.resolveFrom(context),
+                      ),
+                    ),
+                    if (subtitle.isNotEmpty) ...[
+                      const SizedBox(height: 3),
+                      Text(
+                        subtitle,
+                        style: TextStyle(
+                          fontSize: 13,
+                          color: CupertinoColors.secondaryLabel.resolveFrom(
+                            context,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+              if (_detailLoading) ...[
+                const SizedBox(width: 10),
+                const CupertinoActivityIndicator(radius: 8),
+              ],
+            ],
+          ),
+        ),
+        if (showLocation)
+          _InfoRow(
+            icon: CupertinoIcons.location,
+            label: 'Locatie',
+            value: objectLocationName,
+          ),
+        if (warrantyDate != null)
+          _InfoRow(
+            icon: CupertinoIcons.shield,
+            label: 'Garantie',
+            value: 'tot ${_fmtDate(warrantyDate)}',
+          ),
+        if (nextMaintenance != null)
+          _InfoRow(
+            icon: CupertinoIcons.wrench_fill,
+            label: 'Volgend onderhoud',
+            value: _fmtDate(nextMaintenance),
+          ),
+        if (_documentCount != null)
+          _NavRow(
+            icon: CupertinoIcons.doc_on_doc,
+            label: _documentCount == 1
+                ? '1 document'
+                : '$_documentCount documenten',
+            onTap: () => widget.onShowComingSoon('Documenten'),
+          ),
+        _NavRow(
+          icon: CupertinoIcons.clock,
+          label: 'Bekijk servicehistorie',
+          onTap: () => widget.onShowComingSoon('Servicehistorie'),
+        ),
+      ],
     );
   }
 }

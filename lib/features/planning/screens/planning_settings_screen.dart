@@ -86,13 +86,16 @@ class _PlanningSettingsScreenState extends State<PlanningSettingsScreen> {
 
     return CupertinoPageScaffold(
       navigationBar: CupertinoNavigationBar(
-        backgroundColor: CupertinoColors.systemBackground,
+        backgroundColor: CupertinoColors.white,
         border: null,
         leading: CupertinoNavigationBarBackButton(
-          color: CupertinoColors.label.resolveFrom(context),
+          color: CupertinoColors.black,
           onPressed: () => Navigator.of(context).pop(),
         ),
-        middle: const Text('Planning opties'),
+        middle: const Text(
+          'Planning opties',
+          style: TextStyle(color: CupertinoColors.black),
+        ),
       ),
       child: SafeArea(
         child: !_loaded

@@ -336,26 +336,12 @@ class _OrderCard extends StatelessWidget {
     return '${d.day} ${_months[d.month]}';
   }
 
-  Color _stateColor(String state) {
-    final s = state.toLowerCase();
-    if (s.contains('nieuw') || s.contains('new'))
-      return const Color(0xFF4A90D9);
-    if (s.contains('uitvoering') || s.contains('progress'))
-      return const Color(0xFFF5A623);
-    if (s.contains('gereed') || s.contains('done') || s.contains('klaar'))
-      return const Color(0xFF50C878);
-    if (s.contains('gepland') || s.contains('planned'))
-      return const Color(0xFF9B59B6);
-    return const Color(0xFFAAAAAA);
-  }
-
   @override
   Widget build(BuildContext context) {
     final isDark = CupertinoTheme.brightnessOf(context) == Brightness.dark;
     final cardBg = isDark
         ? const Color(0xFF1C1C1E)
         : CupertinoColors.systemBackground;
-    final stateColor = _stateColor(order.workflowState);
     final title = order.description.isNotEmpty
         ? order.description
         : order.orderNumber;
@@ -375,42 +361,31 @@ class _OrderCard extends StatelessWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            // Status dot + label + date row
+            // Title + date row
             Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                _StatusDot(color: stateColor),
-                const SizedBox(width: 6),
-                Text(
-                  order.workflowState,
-                  style: TextStyle(
-                    fontSize: 12,
-                    fontWeight: FontWeight.w500,
-                    color: CupertinoColors.secondaryLabel.resolveFrom(context),
+                Expanded(
+                  child: Text(
+                    title,
+                    style: TextStyle(
+                      fontSize: 17,
+                      fontWeight: FontWeight.w600,
+                      height: 1.3,
+                      color: CupertinoColors.label.resolveFrom(context),
+                    ),
                   ),
                 ),
-                const Spacer(),
+                const SizedBox(width: 8),
                 Text(
                   _formatDate(order.planningDate),
-                  style: TextStyle(
+                  style: const TextStyle(
                     fontSize: 13,
                     fontWeight: FontWeight.w500,
-                    color: CupertinoColors.secondaryLabel.resolveFrom(context),
+                    color: Color(0xFFFF6B2B),
                   ),
                 ),
               ],
-            ),
-
-            const SizedBox(height: 10),
-
-            // Title
-            Text(
-              title,
-              style: TextStyle(
-                fontSize: 17,
-                fontWeight: FontWeight.w600,
-                height: 1.3,
-                color: CupertinoColors.label.resolveFrom(context),
-              ),
             ),
 
             if (order.serviceObjectTag.isNotEmpty) ...[
@@ -468,23 +443,6 @@ class _OrderCard extends StatelessWidget {
           ],
         ),
       ),
-    );
-  }
-}
-
-// ─── Status dot ────────────────────────────────────────────────────────────────
-
-class _StatusDot extends StatelessWidget {
-  final Color color;
-
-  const _StatusDot({required this.color});
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      width: 7,
-      height: 7,
-      decoration: BoxDecoration(color: color, shape: BoxShape.circle),
     );
   }
 }
