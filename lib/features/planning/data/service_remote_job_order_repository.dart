@@ -5,6 +5,7 @@ import 'package:uuid/uuid.dart';
 import '../../../core/api/api_client.dart';
 import '../../../core/auth/auth_service.dart';
 import '../models/hours_entry.dart';
+import '../models/scanned_extra.dart';
 import '../models/service_remote_job_order.dart';
 import 'job_order_submission_builder.dart';
 
@@ -148,6 +149,7 @@ class ServiceRemoteJobOrderRepository {
     required int jobOrderId,
     required int employeeId,
     required List<HoursEntry> hours,
+    List<ScannedExtra> extras = const [],
   }) async {
     final credentials = AuthService.instance.currentCredentials;
     if (credentials == null) {
@@ -157,10 +159,7 @@ class ServiceRemoteJobOrderRepository {
       // Re-verify the session before every submission — required in
       // practice even when already logged in; the official app does this
       // too.
-      await AuthService.instance.login(
-        credentials.username,
-        credentials.password,
-      );
+      await AuthService.instance.reverifySession();
     } catch (e) {
       throw JobOrderSubmissionLoginFailed(e.toString());
     }
@@ -202,10 +201,22 @@ class ServiceRemoteJobOrderRepository {
       appointmentId: appointmentId,
       hours: hours,
       uniqueId: _uuid.v4(),
+      extras: extras,
     );
 
     bool posted;
     try {
+      // Temporary diagnostic: compare the exact outgoing `hours[].memo`
+      // values with what Ridder persists after this submission.
+      debugPrint(
+        '[diag] POST /ServiceRemote/JobOrder/$jobOrderId request body: $body',
+        wrapWidth: 1024,
+      );
+      debugPrint(
+        '[diag] material payload: detailItems=${body['detailItems']} '
+        'detailMisc=${body['detailMisc']}',
+        wrapWidth: 1024,
+      );
       final response = await _dio.post(
         '/ServiceRemote/JobOrder/$jobOrderId',
         data: body,

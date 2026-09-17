@@ -200,10 +200,7 @@ class JobOrderRepository {
       // Step 1 — re-verify the session. Required before every submission,
       // even though we're already logged in; the official app does this
       // too, and it was not optional in practice.
-      await AuthService.instance.login(
-        credentials.username,
-        credentials.password,
-      );
+      await AuthService.instance.reverifySession();
     } catch (e) {
       throw JobOrderSubmissionLoginFailed(e.toString());
     }
@@ -344,10 +341,7 @@ class JobOrderRepository {
       throw const JobOrderSubmissionLoginFailed('Not logged in.');
     }
     try {
-      await AuthService.instance.login(
-        credentials.username,
-        credentials.password,
-      );
+      await AuthService.instance.reverifySession();
     } catch (e) {
       throw JobOrderSubmissionLoginFailed(e.toString());
     }
@@ -439,10 +433,7 @@ class JobOrderRepository {
       throw const JobOrderSubmissionLoginFailed('Not logged in.');
     }
     try {
-      await AuthService.instance.login(
-        credentials.username,
-        credentials.password,
-      );
+      await AuthService.instance.reverifySession();
     } catch (e) {
       throw JobOrderSubmissionLoginFailed(e.toString());
     }

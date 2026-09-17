@@ -1,7 +1,7 @@
 class ApiConfig {
   static const String tenantId = 'Engine Energy B.V.';
-  static const String administrationId = 'RIQ_80167_1';
-  static const String apiKey = '1b2e73fb-eb6f-4578-9281-8c466ded1bf5';
+  static const String administrationId = 'RIQ_80167_3';
+  static const String apiKey = '5f854435-aa71-4d12-843b-cc80188c66cc';
 
   static String get baseUrl =>
       'https://api.eciridderiq.com/${tenantId.replaceAll(' ', '%20')}/$administrationId/v2';

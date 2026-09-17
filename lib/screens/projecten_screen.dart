@@ -1,13 +1,16 @@
-import 'package:flutter/cupertino.dart';
+import 'dart:async';
 
+import 'package:flutter/cupertino.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+
+import '../core/auth/auth_service.dart';
 import '../features/planning/data/planning_repository.dart';
 import '../features/planning/models/job_order.dart' show ServiceOrder;
 import '../features/planning/screens/bon_detail_screen.dart';
+import '../features/planning/screens/work_completion_screen.dart'
+    show bonCompletedKey;
 import '../widgets/engine_logo.dart';
 import '../widgets/nav_border.dart';
-
-// Simulated logged-in user — replace with real auth later.
-const _currentUserName = 'Lex de Bruijn';
 
 class ProjectenScreen extends StatefulWidget {
   const ProjectenScreen({super.key});
@@ -22,10 +25,42 @@ class _ProjectenScreenState extends State<ProjectenScreen> {
   bool _loading = true;
   String? _error;
 
+  Set<String> _completedIds = {};
+  bool _showCompletedBanner = false;
+  Timer? _bannerTimer;
+
   @override
   void initState() {
     super.initState();
     _load();
+  }
+
+  @override
+  void dispose() {
+    _bannerTimer?.cancel();
+    super.dispose();
+  }
+
+  Future<void> _loadCompletedIds() async {
+    final prefs = await SharedPreferences.getInstance();
+    final ids = <String>{
+      for (final o in _orders)
+        if (prefs.getBool(bonCompletedKey(o.id)) ?? false) o.id,
+    };
+    if (mounted) setState(() => _completedIds = ids);
+  }
+
+  Future<void> _openBon(ServiceOrder order) async {
+    final published = await Navigator.of(context).push<bool>(
+      CupertinoPageRoute<bool>(builder: (_) => BonDetailScreen(order: order)),
+    );
+    if (published != true || !mounted) return;
+    setState(() => _completedIds = {..._completedIds, order.id});
+    _bannerTimer?.cancel();
+    setState(() => _showCompletedBanner = true);
+    _bannerTimer = Timer(const Duration(seconds: 2), () {
+      if (mounted) setState(() => _showCompletedBanner = false);
+    });
   }
 
   Future<void> _load() async {
@@ -42,16 +77,15 @@ class _ProjectenScreenState extends State<ProjectenScreen> {
 
   Future<void> _fetch() async {
     try {
+      final myId = AuthService.instance.currentMechanicId;
+      if (myId == null) {
+        setState(() {
+          _error = 'Je bent niet ingelogd.';
+          _loading = false;
+        });
+        return;
+      }
       final orders = await PlanningRepository.instance.fetchServiceOrders();
-      final myId = orders
-          .firstWhere(
-            (o) =>
-                o.mechanic?.name.toLowerCase() ==
-                _currentUserName.toLowerCase(),
-            orElse: () => orders.first,
-          )
-          .mechanic
-          ?.id;
       final myOrders = orders.where((o) => o.mechanic?.id == myId).toList()
         ..sort((a, b) {
           final ad = a.planningDate;
@@ -66,6 +100,7 @@ class _ProjectenScreenState extends State<ProjectenScreen> {
         _orders = ordersWithRelations;
         _loading = false;
       });
+      _loadCompletedIds();
     } catch (e) {
       setState(() {
         _error = e.toString();
@@ -124,23 +159,86 @@ class _ProjectenScreenState extends State<ProjectenScreen> {
         middle: EngineLogo(),
       ),
       child: SafeArea(
-        child: Column(
+        child: Stack(
           children: [
-            const NavBorder(),
-            Expanded(
-              child: _loading
-                  ? const Center(child: CupertinoActivityIndicator())
-                  : _error != null
-                  ? _ErrorView(error: _error!, onRetry: _load)
-                  : _Body(
-                      orders: _filtered,
-                      query: _query,
-                      onQueryChanged: (v) => setState(() => _query = v),
-                      onRefresh: _refresh,
-                    ),
+            Column(
+              children: [
+                const NavBorder(),
+                Expanded(
+                  child: _loading
+                      ? const Center(child: CupertinoActivityIndicator())
+                      : _error != null
+                      ? _ErrorView(error: _error!, onRetry: _load)
+                      : _Body(
+                          orders: _filtered,
+                          query: _query,
+                          completedIds: _completedIds,
+                          onQueryChanged: (v) => setState(() => _query = v),
+                          onRefresh: _refresh,
+                          onOpenBon: _openBon,
+                        ),
+                ),
+              ],
+            ),
+            AnimatedPositioned(
+              duration: const Duration(milliseconds: 300),
+              curve: Curves.easeOutBack,
+              top: _showCompletedBanner ? 12 : -80,
+              left: 16,
+              right: 16,
+              child: AnimatedOpacity(
+                duration: const Duration(milliseconds: 200),
+                opacity: _showCompletedBanner ? 1 : 0,
+                child: const _CompletedBanner(text: 'Werk gepubliceerd'),
+              ),
             ),
           ],
         ),
+      ),
+    );
+  }
+}
+
+// ─── Completed banner ──────────────────────────────────────────────────────────
+
+class _CompletedBanner extends StatelessWidget {
+  final String text;
+  const _CompletedBanner({required this.text});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+      decoration: BoxDecoration(
+        color: const Color(0xFF34C759),
+        borderRadius: BorderRadius.circular(14),
+        boxShadow: [
+          BoxShadow(
+            color: CupertinoColors.black.withValues(alpha: 0.15),
+            blurRadius: 12,
+            offset: const Offset(0, 4),
+          ),
+        ],
+      ),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.center,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const Icon(
+            CupertinoIcons.checkmark_alt_circle_fill,
+            size: 18,
+            color: CupertinoColors.white,
+          ),
+          const SizedBox(width: 8),
+          Text(
+            text,
+            style: const TextStyle(
+              fontSize: 14,
+              fontWeight: FontWeight.w600,
+              color: CupertinoColors.white,
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -151,14 +249,18 @@ class _ProjectenScreenState extends State<ProjectenScreen> {
 class _Body extends StatelessWidget {
   final List<ServiceOrder> orders;
   final String query;
+  final Set<String> completedIds;
   final ValueChanged<String> onQueryChanged;
   final Future<void> Function() onRefresh;
+  final ValueChanged<ServiceOrder> onOpenBon;
 
   const _Body({
     required this.orders,
     required this.query,
+    required this.completedIds,
     required this.onQueryChanged,
     required this.onRefresh,
+    required this.onOpenBon,
   });
 
   @override
@@ -226,12 +328,11 @@ class _Body extends StatelessWidget {
             SliverList(
               delegate: SliverChildBuilderDelegate(
                 (context, i) => GestureDetector(
-                  onTap: () => Navigator.of(context).push(
-                    CupertinoPageRoute<void>(
-                      builder: (_) => BonDetailScreen(order: upcoming[i]),
-                    ),
+                  onTap: () => onOpenBon(upcoming[i]),
+                  child: _OrderCard(
+                    order: upcoming[i],
+                    completed: completedIds.contains(upcoming[i].id),
                   ),
-                  child: _OrderCard(order: upcoming[i]),
                 ),
                 childCount: upcoming.length,
               ),
@@ -242,12 +343,11 @@ class _Body extends StatelessWidget {
             SliverList(
               delegate: SliverChildBuilderDelegate(
                 (context, i) => GestureDetector(
-                  onTap: () => Navigator.of(context).push(
-                    CupertinoPageRoute<void>(
-                      builder: (_) => BonDetailScreen(order: past[i]),
-                    ),
+                  onTap: () => onOpenBon(past[i]),
+                  child: _OrderCard(
+                    order: past[i],
+                    completed: completedIds.contains(past[i].id),
                   ),
-                  child: _OrderCard(order: past[i]),
                 ),
                 childCount: past.length,
               ),
@@ -312,8 +412,9 @@ class _SectionHeader extends StatelessWidget {
 
 class _OrderCard extends StatelessWidget {
   final ServiceOrder order;
+  final bool completed;
 
-  const _OrderCard({required this.order});
+  const _OrderCard({required this.order, this.completed = false});
 
   static const _months = [
     '',
@@ -339,7 +440,10 @@ class _OrderCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final isDark = CupertinoTheme.brightnessOf(context) == Brightness.dark;
-    final cardBg = isDark
+    const completedColor = Color(0xFF34C759);
+    final cardBg = completed
+        ? completedColor.withValues(alpha: isDark ? 0.14 : 0.08)
+        : isDark
         ? const Color(0xFF1C1C1E)
         : CupertinoColors.systemBackground;
     final title = order.description.isNotEmpty
@@ -352,8 +456,12 @@ class _OrderCard extends StatelessWidget {
         color: cardBg,
         borderRadius: BorderRadius.circular(14),
         border: Border.all(
-          color: isDark ? const Color(0xFF38383A) : const Color(0xFFE5E5EA),
-          width: 1,
+          color: completed
+              ? completedColor.withValues(alpha: 0.4)
+              : isDark
+              ? const Color(0xFF38383A)
+              : const Color(0xFFE5E5EA),
+          width: completed ? 1.5 : 1,
         ),
       ),
       child: Padding(
@@ -365,6 +473,14 @@ class _OrderCard extends StatelessWidget {
             Row(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
+                if (completed) ...[
+                  const Icon(
+                    CupertinoIcons.checkmark_alt_circle_fill,
+                    size: 18,
+                    color: completedColor,
+                  ),
+                  const SizedBox(width: 6),
+                ],
                 Expanded(
                   child: Text(
                     title,

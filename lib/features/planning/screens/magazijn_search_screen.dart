@@ -214,53 +214,58 @@ class _MagazijnSearchScreenState extends State<MagazijnSearchScreen> {
             // ── Search bar ────────────────────────────────────────────────
             Padding(
               padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
-              child: Row(
-                children: [
-                  Expanded(
-                    child: Container(
-                      decoration: BoxDecoration(
-                        color: fieldBg,
-                        borderRadius: BorderRadius.circular(10),
-                      ),
-                      child: CupertinoTextField(
-                        controller: _searchCtrl,
-                        focusNode: _focusNode,
-                        placeholder: 'Artikelcode of omschrijving...',
-                        prefix: const Padding(
-                          padding: EdgeInsets.only(left: 10),
-                          child: Icon(
-                            CupertinoIcons.search,
-                            size: 18,
-                            color: CupertinoColors.systemGrey,
+              child: IntrinsicHeight(
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    Expanded(
+                      child: Container(
+                        decoration: BoxDecoration(
+                          color: fieldBg,
+                          borderRadius: BorderRadius.circular(10),
+                        ),
+                        child: CupertinoTextField(
+                          controller: _searchCtrl,
+                          focusNode: _focusNode,
+                          placeholder: 'Artikelcode of omschrijving...',
+                          prefix: const Padding(
+                            padding: EdgeInsets.only(left: 10),
+                            child: Icon(
+                              CupertinoIcons.search,
+                              size: 18,
+                              color: CupertinoColors.systemGrey,
+                            ),
                           ),
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 8,
+                            vertical: 11,
+                          ),
+                          decoration: const BoxDecoration(),
+                          clearButtonMode: OverlayVisibilityMode.editing,
                         ),
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 8,
-                          vertical: 11,
-                        ),
-                        decoration: const BoxDecoration(),
-                        clearButtonMode: OverlayVisibilityMode.editing,
                       ),
                     ),
-                  ),
-                  const SizedBox(width: 10),
-                  GestureDetector(
-                    onTap: _openBarcodeScanner,
-                    child: Container(
-                      width: 44,
-                      height: 44,
-                      decoration: BoxDecoration(
-                        color: const Color(0xFFFF6B2B),
-                        borderRadius: BorderRadius.circular(10),
-                      ),
-                      child: const Icon(
-                        CupertinoIcons.barcode_viewfinder,
-                        color: CupertinoColors.white,
-                        size: 22,
+                    const SizedBox(width: 10),
+                    GestureDetector(
+                      onTap: _openBarcodeScanner,
+                      child: Container(
+                        // Matches the text field's own (intrinsic) height
+                        // instead of a hardcoded value, so they always
+                        // line up regardless of font/padding tweaks.
+                        width: 44,
+                        decoration: BoxDecoration(
+                          color: const Color(0xFFFF6B2B),
+                          borderRadius: BorderRadius.circular(10),
+                        ),
+                        child: const Icon(
+                          CupertinoIcons.barcode_viewfinder,
+                          color: CupertinoColors.white,
+                          size: 22,
+                        ),
                       ),
                     ),
-                  ),
-                ],
+                  ],
+                ),
               ),
             ),
 

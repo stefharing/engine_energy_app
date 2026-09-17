@@ -4,7 +4,7 @@ import '../data/planning_repository.dart';
 import '../models/job_order.dart';
 import '../../../widgets/engine_logo.dart';
 import '../../../core/storage/settings_service.dart';
-import '../../../core/auth/current_user.dart';
+import '../../../core/auth/auth_service.dart';
 import '../../../widgets/nav_border.dart';
 import 'planning_settings_screen.dart';
 import 'bon_detail_screen.dart';
@@ -202,7 +202,7 @@ class _PlanningScreenState extends State<PlanningScreen> {
       });
     }
     final currentIndex = visible.indexWhere(
-      (e) => e.name.toLowerCase() == currentUserName.toLowerCase(),
+      (e) => e.id == AuthService.instance.currentMechanicId,
     );
     if (currentIndex > 0) {
       final current = visible.removeAt(currentIndex);
@@ -388,8 +388,8 @@ class _TimetableViewState extends State<_TimetableView> {
                               borderColor: borderColor,
                               isLast: i == widget.mechanics.length - 1,
                               isCurrentUser:
-                                  widget.mechanics[i].name.toLowerCase() ==
-                                  currentUserName.toLowerCase(),
+                                  widget.mechanics[i].id ==
+                                  AuthService.instance.currentMechanicId,
                             ),
                         ],
                       ),
@@ -417,8 +417,8 @@ class _TimetableViewState extends State<_TimetableView> {
                                   isLast: i == widget.mechanics.length - 1,
                                   hScroll: widget.hScroll,
                                   isCurrentUser:
-                                      widget.mechanics[i].name.toLowerCase() ==
-                                      currentUserName.toLowerCase(),
+                                      widget.mechanics[i].id ==
+                                      AuthService.instance.currentMechanicId,
                                 ),
                             ],
                           ),

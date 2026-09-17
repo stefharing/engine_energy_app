@@ -7,11 +7,40 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:uuid/uuid.dart';
 
 import '../../../core/auth/auth_service.dart';
-import '../../../core/auth/current_user.dart';
 import '../data/planning_repository.dart';
 import '../data/service_remote_job_order_repository.dart';
-import '../models/hours_entry.dart';
 import '../models/job_order.dart';
+
+// SharedPreferences key for a bon's local (not-yet-submitted) hours draft.
+// Also used by [HoursDraftService], which lets [BonDetailScreen]'s publish
+// button read/write the exact same draft this screen does.
+String hoursDraftKeyForOrder(String orderId) => 'hours_week_draft_$orderId';
+
+/// Turns a [ServiceRemoteJobOrderRepository.submitHoursForJobOrder] failure
+/// into the Dutch message shown next to the submit button — shared with
+/// [HoursDraftService] so a publish failure from [BonDetailScreen] reads
+/// the same way as one from this screen.
+String describeHoursSubmitError(Object error) {
+  if (error is JobOrderSubmissionLoginFailed) {
+    return 'Inloggen mislukt bij indienen.\n$error';
+  }
+  if (error is JobOrderSubmissionFetchFailed) {
+    return 'Bon ophalen mislukt.\n$error';
+  }
+  if (error is JobOrderSubmissionAppointmentNotFound) {
+    return 'Deze bon is niet aan jou toegewezen.\n$error';
+  }
+  if (error is JobOrderSubmissionAppointmentOpenFailed) {
+    return 'Afspraak openen mislukt.\n$error';
+  }
+  if (error is JobOrderSubmissionAppointmentCloseFailed) {
+    return 'Afspraak afsluiten mislukt.\n$error';
+  }
+  if (error is JobOrderSubmissionPostFailed) {
+    return 'Indienen van de uren mislukt.\n$error';
+  }
+  return 'Indienen mislukt.\n$error';
+}
 
 // The dashboard's accent orange, reused here so this screen's interactive
 // accents (selected states, buttons, links) match the rest of the app
@@ -125,8 +154,9 @@ class _HourCard {
 /// screen) or left empty for the technician to pick (opened from the
 /// dashboard). Hours are entered as individual cards (amount + type +
 /// description) via the "+" button, rather than fixed work/travel fields.
-/// Submission writes to Ridder via
-/// [ServiceRemoteJobOrderRepository.submitHoursForJobOrder].
+/// "Uren opslaan" only saves the draft locally — actually publishing to
+/// Ridder happens in one go from the "Werk afronden" screen, via
+/// `HoursDraftService.submitPendingHours`.
 class HoursWeekScreen extends StatefulWidget {
   final ServiceOrder? initialOrder;
 
@@ -150,7 +180,7 @@ class _HoursWeekScreenState extends State<HoursWeekScreen> {
   final _uuid = const Uuid();
 
   String? _draftKeyFor(ServiceOrder? order) =>
-      order == null ? null : 'hours_week_draft_${order.id}';
+      order == null ? null : hoursDraftKeyForOrder(order.id);
 
   static const _months = [
     '',
@@ -245,16 +275,6 @@ class _HoursWeekScreenState extends State<HoursWeekScreen> {
   bool get _hasPendingCards =>
       _cardsByDay.values.any((l) => l.any((c) => !c.submitted));
 
-  /// Total of only the cards already sent to Ridder — used when leaving the
-  /// screen, so [BonDetailScreen] doesn't get credited for still-local
-  /// drafts that were never actually submitted.
-  double get _submittedTotalHours =>
-      _cardsByDay.values
-          .expand((l) => l)
-          .where((c) => c.submitted)
-          .fold(0, (s, c) => s + c.minutes) /
-      60;
-
   String _fmtDate(DateTime d) =>
       '${_fullDayNames[d.weekday]} ${d.day} ${_months[d.month]}';
   String _fmtDouble(double v) =>
@@ -269,26 +289,24 @@ class _HoursWeekScreenState extends State<HoursWeekScreen> {
       _cardsByDay[_key(d)] = [];
     }
     final key = _draftKeyFor(_selectedOrder);
-    if (key == null) {
-      if (mounted) setState(() {});
-      return;
-    }
-    final prefs = await SharedPreferences.getInstance();
-    final raw = prefs.getString(key);
-    if (raw == null) {
-      if (mounted) setState(() {});
-      return;
-    }
-    final draft = jsonDecode(raw) as Map<String, dynamic>;
-    final days = (draft['days'] as Map<String, dynamic>?) ?? {};
-    for (final entry in days.entries) {
-      final d = entry.value as Map<String, dynamic>;
-      final cardsJson = (d['cards'] as List<dynamic>?) ?? const [];
-      _cardsByDay[entry.key] = cardsJson
-          .map(
-            (c) => _HourCard.fromDraftJson(Map<String, dynamic>.from(c as Map)),
-          )
-          .toList();
+    if (key != null) {
+      final prefs = await SharedPreferences.getInstance();
+      final raw = prefs.getString(key);
+      if (raw != null) {
+        final draft = jsonDecode(raw) as Map<String, dynamic>;
+        final days = (draft['days'] as Map<String, dynamic>?) ?? {};
+        for (final entry in days.entries) {
+          final d = entry.value as Map<String, dynamic>;
+          final cardsJson = (d['cards'] as List<dynamic>?) ?? const [];
+          _cardsByDay[entry.key] = cardsJson
+              .map(
+                (c) => _HourCard.fromDraftJson(
+                  Map<String, dynamic>.from(c as Map),
+                ),
+              )
+              .toList();
+        }
+      }
     }
     if (mounted) setState(() {});
   }
@@ -370,109 +388,33 @@ class _HoursWeekScreenState extends State<HoursWeekScreen> {
     _scheduleDraftSave();
   }
 
-  /// Builds one [HoursEntry] per not-yet-submitted card, in chronological
-  /// order within each day (so multiple cards on the same day get distinct,
-  /// non-overlapping start/end times — only their total duration and day
-  /// actually matter to the API, but a sane local narrative is easy to
-  /// keep). Cards already marked [_HourCard.submitted] are skipped — they
-  /// were sent in an earlier round and must not be sent again.
-  List<HoursEntry> _buildHoursEntries() {
-    final order = _selectedOrder;
-    if (order == null) return const [];
-    final entries = <HoursEntry>[];
-    for (final d in _days) {
-      final cards = (_cardsByDay[_key(d)] ?? const [])
-          .where((c) => !c.submitted)
-          .toList();
-      if (cards.isEmpty) continue;
-      var cursor = DateTime(d.year, d.month, d.day, 8);
-      for (final card in cards) {
-        final end = cursor.add(Duration(minutes: card.minutes));
-        entries.add(
-          HoursEntry(
-            jobOrderId: int.parse(order.id),
-            employeeId: AuthService.instance.currentMechanicId!,
-            start: cursor,
-            end: end,
-            totalTime: card.minutes,
-            timeEmployee: card.minutes,
-            workActivityId: card.workActivityId,
-            uniqueId: _uuid.v4(),
-            memo: card.memo,
-          ),
-        );
-        cursor = end;
-      }
-    }
-    return entries;
-  }
-
-  static String _submitErrorMessage(Object error) {
-    if (error is JobOrderSubmissionLoginFailed) {
-      return 'Inloggen mislukt bij indienen.\n$error';
-    }
-    if (error is JobOrderSubmissionFetchFailed) {
-      return 'Bon ophalen mislukt.\n$error';
-    }
-    if (error is JobOrderSubmissionAppointmentNotFound) {
-      return 'Deze bon is niet aan jou toegewezen.\n$error';
-    }
-    if (error is JobOrderSubmissionAppointmentOpenFailed) {
-      return 'Afspraak openen mislukt.\n$error';
-    }
-    if (error is JobOrderSubmissionAppointmentCloseFailed) {
-      return 'Afspraak afsluiten mislukt.\n$error';
-    }
-    if (error is JobOrderSubmissionPostFailed) {
-      return 'Indienen van de uren mislukt.\n$error';
-    }
-    return 'Indienen mislukt.\n$error';
-  }
-
+  /// Saves the entered hours to this bon's local draft only — it no longer
+  /// submits to Ridder directly. Publishing now happens in one go from the
+  /// "Werk afronden" screen (see `HoursDraftService.submitPendingHours`),
+  /// which reads this same draft and is the only place that still calls
+  /// [ServiceRemoteJobOrderRepository.submitHoursForJobOrder]. Cards stay
+  /// unlocked (not marked [_HourCard.submitted]) since nothing's actually
+  /// been sent yet.
   Future<void> _submit() async {
     final order = _selectedOrder;
     if (order == null) {
       setState(() => _submitError = 'Selecteer eerst een bon.');
       return;
     }
-    final mechanicId = AuthService.instance.currentMechanicId;
-    if (mechanicId == null) {
+    if (AuthService.instance.currentMechanicId == null) {
       setState(() => _submitError = 'Je bent niet ingelogd.');
       return;
     }
-    final entries = _buildHoursEntries();
-    if (entries.isEmpty) return;
+    if (!_hasPendingCards) return;
 
     setState(() {
       _submitting = true;
       _submitError = null;
     });
-    try {
-      await ServiceRemoteJobOrderRepository.instance.submitHoursForJobOrder(
-        jobOrderId: int.parse(order.id),
-        employeeId: mechanicId,
-        hours: entries,
-      );
-      if (!mounted) return;
-      // Keep the cards visible — just lock them so they read as sent
-      // rather than disappearing, and can't be re-submitted or deleted.
-      setState(() {
-        for (final d in _days) {
-          final key = _key(d);
-          _cardsByDay[key] = (_cardsByDay[key] ?? const [])
-              .map((c) => c.submitted ? c : c.copyWith(submitted: true))
-              .toList();
-        }
-        _submitting = false;
-      });
-      await _saveDraft();
-    } catch (e) {
-      if (!mounted) return;
-      setState(() {
-        _submitting = false;
-        _submitError = _submitErrorMessage(e);
-      });
-    }
+    _draftSaveTimer?.cancel();
+    await _saveDraft();
+    if (!mounted) return;
+    Navigator.of(context).pop(true);
   }
 
   @override
@@ -492,17 +434,7 @@ class _HoursWeekScreenState extends State<HoursWeekScreen> {
         padding: const EdgeInsetsDirectional.only(start: 4, end: 4),
         leading: CupertinoNavigationBarBackButton(
           color: CupertinoColors.black,
-          onPressed: () {
-            // Only report a submitted total back to the caller if it still
-            // matches the bon the screen was opened for — if the technician
-            // switched to a different bon, those hours don't belong to the
-            // caller's optimistic display.
-            final matchesInitial =
-                widget.initialOrder != null &&
-                _selectedOrder?.id == widget.initialOrder!.id;
-            final submitted = matchesInitial ? _submittedTotalHours : 0.0;
-            Navigator.of(context).pop(submitted > 0 ? submitted : null);
-          },
+          onPressed: () => Navigator.of(context).pop(),
         ),
         middle: const Text(
           'Uren & KM',
@@ -829,11 +761,12 @@ class _ProjectSelectorBar extends StatelessWidget {
   }
 }
 
+
 // ─── Bon picker screen ───────────────────────────────────────────────────────
 
 /// Full-screen picker listing the current technician's bonnen (filtered the
-/// same way [ProjectenScreen] does — by matching the logged-in mechanic's
-/// name), with search, for choosing which one to book hours onto.
+/// same way [ProjectenScreen] does — by the logged-in mechanic's id), with
+/// search, for choosing which one to book hours onto.
 class _BonPickerScreen extends StatefulWidget {
   final String? selectedId;
 
@@ -861,15 +794,15 @@ class _BonPickerScreenState extends State<_BonPickerScreen> {
       _error = null;
     });
     try {
+      final myId = AuthService.instance.currentMechanicId;
+      if (myId == null) {
+        setState(() {
+          _error = 'Je bent niet ingelogd.';
+          _loading = false;
+        });
+        return;
+      }
       final orders = await PlanningRepository.instance.fetchServiceOrders();
-      final myId = orders
-          .firstWhere(
-            (o) =>
-                o.mechanic?.name.toLowerCase() == currentUserName.toLowerCase(),
-            orElse: () => orders.first,
-          )
-          .mechanic
-          ?.id;
       final myOrders = orders.where((o) => o.mechanic?.id == myId).toList()
         ..sort((a, b) {
           final ad = a.planningDate;
@@ -1721,7 +1654,7 @@ class _SubmitFooter extends StatelessWidget {
             child: submitting
                 ? const CupertinoActivityIndicator(color: CupertinoColors.white)
                 : const Text(
-                    'Uren indienen',
+                    'Uren opslaan',
                     style: TextStyle(
                       fontWeight: FontWeight.w600,
                       color: CupertinoColors.white,

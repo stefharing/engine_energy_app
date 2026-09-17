@@ -1,6 +1,5 @@
 import 'dart:convert';
 
-import 'package:dio/dio.dart';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/services.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
@@ -9,6 +8,8 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../../../core/api/api_client.dart';
 import '../data/planning_repository.dart';
 import '../models/job_order.dart';
+import '../models/scanned_extra.dart';
+import '../widgets/quantity_dialog.dart';
 import 'magazijn_search_screen.dart';
 
 class PartsListScreen extends StatefulWidget {
@@ -23,7 +24,7 @@ class PartsListScreen extends StatefulWidget {
 class _PartsListScreenState extends State<PartsListScreen> {
   List<Map<String, dynamic>> _parts = [];
   Map<String, int> _scannedCounts = {};
-  List<_ScannedExtra> _extras = [];
+  List<ScannedExtra> _extras = [];
   Set<String> _flashIds = {};
   String? _toastMessage;
   bool _loading = true;
@@ -69,9 +70,6 @@ class _PartsListScreenState extends State<PartsListScreen> {
     final scanned = _scannedCounts[_partId(p)] ?? 0;
     return s + scanned.clamp(0, _expectedQty(p));
   });
-
-  double get _progress =>
-      _totalExpected == 0 ? 0.0 : _totalScannedQty / _totalExpected;
 
   bool get _anyScanned => _totalScannedQty > 0 || _extras.isNotEmpty;
 
@@ -119,14 +117,14 @@ class _PartsListScreenState extends State<PartsListScreen> {
       final extrasRaw = prefs.getString('extra_scanned_$_orderId') ?? '[]';
       final loadedExtras = (jsonDecode(extrasRaw) as List)
           .cast<Map<String, dynamic>>()
-          .map(_ScannedExtra.fromJson)
+          .map(ScannedExtra.fromJson)
           .toList();
 
       // A synced extra becomes a real joborderdetail line in Ridder, so on
       // the next load it comes back here as a normal (office-style) part.
       // Fold it into the picked-parts count instead of showing it twice.
       var extrasChanged = false;
-      final extras = <_ScannedExtra>[];
+      final extras = <ScannedExtra>[];
       for (final extra in loadedExtras) {
         Map<String, dynamic>? mergedPart;
         if (extra.ridderId != null) {
@@ -198,24 +196,6 @@ class _PartsListScreenState extends State<PartsListScreen> {
     if (mounted) setState(() => _scanCooldown = false);
   }
 
-  Future<int?> _promptQuantity({
-    required String title,
-    required String subtitle,
-    required int defaultQty,
-    int minimumQty = 1,
-  }) {
-    return showCupertinoDialog<int>(
-      context: context,
-      barrierDismissible: false,
-      builder: (_) => _QuantityDialog(
-        title: title,
-        subtitle: subtitle,
-        defaultQty: defaultQty,
-        minimumQty: minimumQty,
-      ),
-    );
-  }
-
   Future<void> _showQuantityDialog(String rawBarcode) async {
     final code = rawBarcode.trim().toUpperCase();
 
@@ -246,7 +226,8 @@ class _PartsListScreenState extends State<PartsListScreen> {
       defaultQty = 1;
     }
 
-    final qty = await _promptQuantity(
+    final qty = await promptQuantity(
+      context,
       title: title,
       subtitle: subtitle,
       defaultQty: defaultQty,
@@ -281,7 +262,8 @@ class _PartsListScreenState extends State<PartsListScreen> {
     final id = _partId(part);
     final item = part['item'] as Map<String, dynamic>?;
 
-    final qty = await _promptQuantity(
+    final qty = await promptQuantity(
+      context,
       title: _partCode(part),
       subtitle:
           item?['description'] as String? ??
@@ -355,7 +337,7 @@ class _PartsListScreenState extends State<PartsListScreen> {
     }
 
     setState(
-      () => _extras.add(_ScannedExtra(item: item, scannedCount: quantity)),
+      () => _extras.add(ScannedExtra(item: item, scannedCount: quantity)),
     );
     await _saveExtras();
     _showToast('Artikel toegevoegd als extra');
@@ -385,81 +367,9 @@ class _PartsListScreenState extends State<PartsListScreen> {
     );
   }
 
-  /// Ridder returns validation failures as a Problem-details body with a
-  /// `columnerrors` map (field -> Dutch message) and/or a `detail` string.
-  /// Falls back to the raw exception if the response doesn't match that shape.
-  String _friendlyError(Object e) {
-    if (e is DioException) {
-      final data = e.response?.data;
-      if (data is Map) {
-        final columnErrors = data['columnerrors'];
-        if (columnErrors is Map && columnErrors.isNotEmpty) {
-          return columnErrors.values.join('\n');
-        }
-        final detail = data['detail'];
-        if (detail is String && detail.isNotEmpty) return detail;
-      }
-    }
-    return e.toString();
-  }
-
   Future<void> _confirm() async {
     setState(() => _confirming = true);
     try {
-      final pending = _extras.where((e) => e.needsSync).toList();
-      if (pending.isNotEmpty) {
-        final joborderId = int.tryParse(_orderId);
-        final orderId = int.tryParse(widget.order.productionOrderId ?? '');
-        if (joborderId == null || orderId == null) {
-          throw Exception(
-            'Kan extra artikelen niet koppelen: ordergegevens ontbreken.',
-          );
-        }
-        for (final extra in pending) {
-          final itemWarehouseId = await PlanningRepository.instance
-              .fetchItemWarehouseId(extra.itemId);
-          if (itemWarehouseId == null) {
-            throw Exception(
-              'Geen magazijnlocatie gevonden voor ${extra.code}.',
-            );
-          }
-          final int ridderId;
-          if (extra.ridderId == null) {
-            ridderId = await PlanningRepository.instance
-                .createJobOrderExtraPart(
-                  itemId: extra.itemId,
-                  itemWarehouseId: itemWarehouseId,
-                  joborderId: joborderId,
-                  orderId: orderId,
-                  quantity: extra.scannedCount.toDouble(),
-                  sawingCodeChoiceNumber: extra.sawingCode,
-                  memo: 'Extra artikel - Bon ${widget.order.orderNumber}',
-                );
-          } else {
-            ridderId = extra.ridderId!;
-            await PlanningRepository.instance.updateJobOrderExtraPart(
-              id: ridderId,
-              itemId: extra.itemId,
-              itemWarehouseId: itemWarehouseId,
-              joborderId: joborderId,
-              orderId: orderId,
-              quantity: extra.scannedCount.toDouble(),
-              sawingCodeChoiceNumber: extra.sawingCode,
-              memo: 'Extra artikel - Bon ${widget.order.orderNumber}',
-            );
-          }
-
-          final idx = _extras.indexWhere((e) => e.code == extra.code);
-          if (idx >= 0) {
-            _extras[idx] = _extras[idx].copyWith(
-              ridderId: ridderId,
-              syncedQuantity: extra.scannedCount,
-            );
-          }
-        }
-        await _saveExtras();
-      }
-
       final prefs = await SharedPreferences.getInstance();
       for (final p in _parts) {
         await prefs.setBool('part_taken_${_orderId}_${p['id']}', true);
@@ -474,7 +384,7 @@ class _PartsListScreenState extends State<PartsListScreen> {
         builder: (ctx) => CupertinoAlertDialog(
           title: const Text('Bevestigen mislukt'),
           content: Text(
-            'De extra artikelen konden niet naar Ridder worden weggeschreven.\n${_friendlyError(e)}',
+            'De materialen konden niet lokaal worden opgeslagen.\n$e',
           ),
           actions: [
             CupertinoDialogAction(
@@ -622,23 +532,35 @@ class _PartsListScreenState extends State<PartsListScreen> {
                     SliverToBoxAdapter(
                       child: Padding(
                         padding: const EdgeInsets.fromLTRB(16, 20, 16, 0),
-                        child: const Text(
-                          'Artikelen picken',
-                          style: TextStyle(
-                            fontSize: 28,
-                            fontWeight: FontWeight.w700,
-                          ),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            const Text(
+                              'Artikelen picken',
+                              style: TextStyle(
+                                fontSize: 28,
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
+                            // Low-key pick count — just enough to track
+                            // progress without competing with the title.
+                            if (!_loading &&
+                                _error == null &&
+                                _parts.isNotEmpty) ...[
+                              const SizedBox(height: 4),
+                              Text(
+                                '$_totalScannedQty van $_totalExpected stuks gepickt',
+                                style: TextStyle(
+                                  fontSize: 13,
+                                  color: CupertinoColors.secondaryLabel
+                                      .resolveFrom(context),
+                                ),
+                              ),
+                            ],
+                          ],
                         ),
                       ),
                     ),
-                    // ── Voortgang ────────────────────────────────────────────
-                    if (!_loading && _error == null && _parts.isNotEmpty)
-                      SliverToBoxAdapter(
-                        child: Padding(
-                          padding: const EdgeInsets.fromLTRB(16, 16, 16, 0),
-                          child: _buildProgress(isDark),
-                        ),
-                      ),
                     // ── Content ──────────────────────────────────────────────
                     if (_loading)
                       const SliverFillRemaining(
@@ -710,7 +632,89 @@ class _PartsListScreenState extends State<PartsListScreen> {
                   child: Column(
                     mainAxisSize: MainAxisSize.min,
                     children: [
+                      Row(
+                        children: [
+                          Expanded(
+                            child: CupertinoButton(
+                              padding: const EdgeInsets.symmetric(vertical: 14),
+                              color: _scannerActive
+                                  ? const Color(0xFF636366)
+                                  : const Color(0xFFE5E5EA),
+                              borderRadius: BorderRadius.circular(14),
+                              onPressed: _scannerActive
+                                  ? _stopScanner
+                                  : _startScanner,
+                              child: Row(
+                                mainAxisAlignment: MainAxisAlignment.center,
+                                children: [
+                                  Icon(
+                                    _scannerActive
+                                        ? CupertinoIcons.stop_circle
+                                        : CupertinoIcons.barcode_viewfinder,
+                                    size: 20,
+                                    color: _scannerActive
+                                        ? CupertinoColors.white
+                                        : CupertinoColors.label.resolveFrom(
+                                            context,
+                                          ),
+                                  ),
+                                  const SizedBox(width: 8),
+                                  Text(
+                                    _scannerActive ? 'Stop scannen' : 'Scannen',
+                                    style: TextStyle(
+                                      fontSize: 16,
+                                      fontWeight: FontWeight.w600,
+                                      color: _scannerActive
+                                          ? CupertinoColors.white
+                                          : CupertinoColors.label.resolveFrom(
+                                              context,
+                                            ),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
+                          const SizedBox(width: 10),
+                          Expanded(
+                            child: CupertinoButton(
+                              padding: const EdgeInsets.symmetric(vertical: 14),
+                              // Neutral, not another saturated color — this
+                              // is a secondary action next to "Scannen".
+                              color: isDark
+                                  ? const Color(0xFF2C2C2E)
+                                  : const Color(0xFFE5E5EA),
+                              borderRadius: BorderRadius.circular(14),
+                              onPressed: _addFromSearch,
+                              child: Row(
+                                mainAxisAlignment: MainAxisAlignment.center,
+                                children: [
+                                  Icon(
+                                    CupertinoIcons.search,
+                                    size: 20,
+                                    color: CupertinoColors.label.resolveFrom(
+                                      context,
+                                    ),
+                                  ),
+                                  const SizedBox(width: 8),
+                                  Text(
+                                    'Zoeken',
+                                    style: TextStyle(
+                                      fontSize: 16,
+                                      fontWeight: FontWeight.w600,
+                                      color: CupertinoColors.label.resolveFrom(
+                                        context,
+                                      ),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
                       if (_anyScanned) ...[
+                        SizedBox(height: 10),
                         SizedBox(
                           width: double.infinity,
                           child: CupertinoButton(
@@ -732,73 +736,7 @@ class _PartsListScreenState extends State<PartsListScreen> {
                                   ),
                           ),
                         ),
-                        const SizedBox(height: 10),
                       ],
-                      Row(
-                        children: [
-                          Expanded(
-                            child: CupertinoButton(
-                              padding: const EdgeInsets.symmetric(vertical: 14),
-                              color: _scannerActive
-                                  ? const Color(0xFF636366)
-                                  : const Color(0xFFFF9500),
-                              borderRadius: BorderRadius.circular(14),
-                              onPressed: _scannerActive
-                                  ? _stopScanner
-                                  : _startScanner,
-                              child: Row(
-                                mainAxisAlignment: MainAxisAlignment.center,
-                                children: [
-                                  Icon(
-                                    _scannerActive
-                                        ? CupertinoIcons.stop_circle
-                                        : CupertinoIcons.barcode_viewfinder,
-                                    size: 20,
-                                    color: CupertinoColors.white,
-                                  ),
-                                  const SizedBox(width: 8),
-                                  Text(
-                                    _scannerActive ? 'Stop scannen' : 'Scannen',
-                                    style: const TextStyle(
-                                      fontSize: 16,
-                                      fontWeight: FontWeight.w600,
-                                      color: CupertinoColors.white,
-                                    ),
-                                  ),
-                                ],
-                              ),
-                            ),
-                          ),
-                          const SizedBox(width: 10),
-                          Expanded(
-                            child: CupertinoButton(
-                              padding: const EdgeInsets.symmetric(vertical: 14),
-                              color: const Color(0xFF3A3A3C),
-                              borderRadius: BorderRadius.circular(14),
-                              onPressed: _addFromSearch,
-                              child: const Row(
-                                mainAxisAlignment: MainAxisAlignment.center,
-                                children: [
-                                  Icon(
-                                    CupertinoIcons.search,
-                                    size: 20,
-                                    color: CupertinoColors.white,
-                                  ),
-                                  SizedBox(width: 8),
-                                  Text(
-                                    'Zoeken',
-                                    style: TextStyle(
-                                      fontSize: 16,
-                                      fontWeight: FontWeight.w600,
-                                      color: CupertinoColors.white,
-                                    ),
-                                  ),
-                                ],
-                              ),
-                            ),
-                          ),
-                        ],
-                      ),
                     ],
                   ),
                 ),
@@ -846,69 +784,6 @@ class _PartsListScreenState extends State<PartsListScreen> {
     );
   }
 
-  Widget _buildProgress(bool isDark) {
-    final progress = _progress;
-    final trackColor = isDark
-        ? const Color(0xFF3A3A3C)
-        : const Color(0xFFE5E5EA);
-
-    return Container(
-      padding: const EdgeInsets.fromLTRB(14, 12, 14, 14),
-      decoration: BoxDecoration(
-        color: isDark
-            ? const Color(0xFF1C1C1E)
-            : CupertinoColors.systemBackground,
-        borderRadius: BorderRadius.circular(14),
-        border: Border.all(
-          color: isDark ? const Color(0xFF38383A) : const Color(0xFFE5E5EA),
-        ),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              Text(
-                '$_totalScannedQty van $_totalExpected stuks gescand',
-                style: TextStyle(
-                  fontSize: 13,
-                  color: CupertinoColors.secondaryLabel.resolveFrom(context),
-                ),
-              ),
-              const Spacer(),
-              Text(
-                '${(progress * 100).round()}%',
-                style: const TextStyle(
-                  fontSize: 13,
-                  fontWeight: FontWeight.w700,
-                  color: Color(0xFFFF9500),
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 8),
-          ClipRRect(
-            borderRadius: BorderRadius.circular(3),
-            child: SizedBox(
-              height: 6,
-              child: Stack(
-                fit: StackFit.expand,
-                children: [
-                  Container(color: trackColor),
-                  FractionallySizedBox(
-                    widthFactor: progress.clamp(0.0, 1.0),
-                    alignment: Alignment.centerLeft,
-                    child: Container(color: const Color(0xFFFF9500)),
-                  ),
-                ],
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
   Widget _buildError() {
     return Center(
       child: Padding(
@@ -931,101 +806,6 @@ class _PartsListScreenState extends State<PartsListScreen> {
           ],
         ),
       ),
-    );
-  }
-}
-
-// ─── Quantity dialog ──────────────────────────────────────────────────────────
-
-class _QuantityDialog extends StatefulWidget {
-  final String title;
-  final String subtitle;
-  final int defaultQty;
-  final int minimumQty;
-
-  const _QuantityDialog({
-    required this.title,
-    required this.subtitle,
-    required this.defaultQty,
-    required this.minimumQty,
-  });
-
-  @override
-  State<_QuantityDialog> createState() => _QuantityDialogState();
-}
-
-class _QuantityDialogState extends State<_QuantityDialog> {
-  late final TextEditingController _ctrl;
-
-  @override
-  void initState() {
-    super.initState();
-    _ctrl = TextEditingController(text: '${widget.defaultQty}');
-    _ctrl.selection = TextSelection(
-      baseOffset: 0,
-      extentOffset: _ctrl.text.length,
-    );
-  }
-
-  @override
-  void dispose() {
-    _ctrl.dispose();
-    super.dispose();
-  }
-
-  void _confirm() {
-    final qty = int.tryParse(_ctrl.text.trim());
-    if (qty != null && qty >= widget.minimumQty) {
-      Navigator.of(context).pop(qty);
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return CupertinoAlertDialog(
-      title: Text(widget.title),
-      content: Column(
-        children: [
-          if (widget.subtitle.isNotEmpty) ...[
-            const SizedBox(height: 2),
-            Text(widget.subtitle, style: const TextStyle(fontSize: 13)),
-          ],
-          const SizedBox(height: 14),
-          CupertinoTextField(
-            controller: _ctrl,
-            autofocus: true,
-            keyboardType: TextInputType.number,
-            inputFormatters: [FilteringTextInputFormatter.digitsOnly],
-            textAlign: TextAlign.center,
-            style: const TextStyle(fontSize: 26, fontWeight: FontWeight.w700),
-            placeholder: '0',
-            decoration: BoxDecoration(
-              color: CupertinoColors.tertiarySystemBackground,
-              borderRadius: BorderRadius.circular(8),
-            ),
-            onSubmitted: (_) => _confirm(),
-          ),
-          const SizedBox(height: 4),
-          Text(
-            'stuks',
-            style: TextStyle(
-              fontSize: 13,
-              color: CupertinoColors.secondaryLabel.resolveFrom(context),
-            ),
-          ),
-        ],
-      ),
-      actions: [
-        CupertinoDialogAction(
-          onPressed: () => Navigator.of(context).pop(null),
-          child: const Text('Annuleren'),
-        ),
-        CupertinoDialogAction(
-          isDefaultAction: true,
-          onPressed: _confirm,
-          child: const Text('Bevestigen'),
-        ),
-      ],
     );
   }
 }
@@ -1229,7 +1009,7 @@ class _PartCard extends StatelessWidget {
 // ─── Extra scanned card ───────────────────────────────────────────────────────
 
 class _ExtraCard extends StatelessWidget {
-  final _ScannedExtra extra;
+  final ScannedExtra extra;
   final bool isDark;
 
   const _ExtraCard({required this.extra, required this.isDark});
@@ -1313,64 +1093,4 @@ class _ExtraCard extends StatelessWidget {
       ),
     );
   }
-}
-
-// ─── Scanned extra model ──────────────────────────────────────────────────────
-
-/// A picked part that wasn't on the office-planned list. Keeps the raw
-/// `/itemmanagement/items` catalog record so it can be turned into a real
-/// job order line (`item.id`) when confirmed.
-///
-/// [ridderId] and [syncedQuantity] track whether (and at what quantity)
-/// this extra was already written to Ridder, so re-confirming doesn't
-/// create a duplicate line — it only updates the existing one if the
-/// quantity changed since the last sync.
-class _ScannedExtra {
-  final Map<String, dynamic> item;
-  final int scannedCount;
-  final int? ridderId;
-  final int? syncedQuantity;
-
-  const _ScannedExtra({
-    required this.item,
-    required this.scannedCount,
-    this.ridderId,
-    this.syncedQuantity,
-  });
-
-  String get code => item['code'] as String? ?? '';
-  String get description => (item['description'] as String?)?.isNotEmpty == true
-      ? item['description'] as String
-      : (item['recordtag'] as String? ?? 'Onbekend artikel');
-  int get itemId => item['id'] as int;
-  int get sawingCode =>
-      (item['defaultsawingcode'] as Map<String, dynamic>?)?['choicenumber']
-          as int? ??
-      1;
-  bool get needsSync => ridderId == null || syncedQuantity != scannedCount;
-
-  _ScannedExtra copyWith({
-    int? scannedCount,
-    int? ridderId,
-    int? syncedQuantity,
-  }) => _ScannedExtra(
-    item: item,
-    scannedCount: scannedCount ?? this.scannedCount,
-    ridderId: ridderId ?? this.ridderId,
-    syncedQuantity: syncedQuantity ?? this.syncedQuantity,
-  );
-
-  factory _ScannedExtra.fromJson(Map<String, dynamic> j) => _ScannedExtra(
-    item: (j['item'] as Map).cast<String, dynamic>(),
-    scannedCount: (j['scannedCount'] as num?)?.toInt() ?? 1,
-    ridderId: (j['ridderId'] as num?)?.toInt(),
-    syncedQuantity: (j['syncedQuantity'] as num?)?.toInt(),
-  );
-
-  Map<String, dynamic> toJson() => {
-    'item': item,
-    'scannedCount': scannedCount,
-    if (ridderId != null) 'ridderId': ridderId,
-    if (syncedQuantity != null) 'syncedQuantity': syncedQuantity,
-  };
 }

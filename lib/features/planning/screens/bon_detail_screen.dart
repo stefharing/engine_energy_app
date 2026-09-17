@@ -1,16 +1,23 @@
+import 'dart:async';
 import 'dart:convert';
+import 'dart:typed_data';
 
 import 'package:flutter/cupertino.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../../../core/api/api_client.dart';
+import '../data/hours_draft_service.dart';
 import '../data/planning_repository.dart';
+import '../data/signature_draft_service.dart';
 import '../models/job_order.dart';
 import '../models/service_interval.dart';
 import 'declarations_screen.dart';
+import 'extra_materials_screen.dart';
 import 'hours_week_screen.dart';
 import 'parts_list_screen.dart';
+import 'signature_pad_screen.dart';
+import 'work_completion_screen.dart' show WorkCompletionScreen, bonCompletedKey;
 import 'work_report_screen.dart';
 
 // ─── Screen ────────────────────────────────────────────────────────────────────
@@ -45,8 +52,6 @@ class _BonDetailScreenState extends State<BonDetailScreen> {
   int _extraCount = 0;
   bool _partsConfirmed = false;
 
-  List<Map<String, dynamic>> _projectTimes = [];
-
   Map<String, dynamic>? _address;
   String? _contactName;
   String? _contactPhone;
@@ -56,29 +61,19 @@ class _BonDetailScreenState extends State<BonDetailScreen> {
   bool _showNavTitle = false;
   final _scrollCtrl = ScrollController();
 
+  String? _bannerText;
+  Timer? _bannerTimer;
+
+  Uint8List? _signatureBytes;
+  bool _isCompleted = false;
+
   ServiceOrder get _order => widget.order;
   int get _aantalOpenPick =>
       _parts.where((p) => !_takenIds.contains(p['id'].toString())).length;
 
-  /// Locally-submitted total from this session's [HoursWeekScreen] run, if
-  /// any — shown in preference to [_projectTimesTotal] right after a
-  /// successful submit, since that v2 query (`/hours/projecttimes`) reads a
-  /// different table than the v1 `hours[]` write and won't reflect it until
-  /// Ridder's office-side processing (if ever) syncs the two.
-  double? _optimisticHoursOverride;
-
-  double get _projectTimesTotal => _projectTimes.fold(0.0, (sum, p) {
-    final s = p['timeemployee'] as String?;
-    if (s == null) return sum;
-    final parts = s.split(':');
-    if (parts.length < 2) return sum;
-    final hours = int.tryParse(parts[0]) ?? 0;
-    final minutes = int.tryParse(parts[1]) ?? 0;
-    return sum + hours + minutes / 60;
-  });
-
-  double get _totalUrenGeregistreerd =>
-      _optimisticHoursOverride ?? _projectTimesTotal;
+  /// Total hours in this bon's local draft (see [HoursDraftService]) —
+  /// every card entered via "Uren & km".
+  double _totalUrenGeregistreerd = 0;
 
   @override
   void initState() {
@@ -94,12 +89,13 @@ class _BonDetailScreenState extends State<BonDetailScreen> {
   @override
   void dispose() {
     _scrollCtrl.dispose();
+    _bannerTimer?.cancel();
     super.dispose();
   }
 
-  Future<void> _load() async {
+  Future<void> _load({bool showLoading = true}) async {
     setState(() {
-      _loading = true;
+      if (showLoading) _loading = true;
       _error = null;
     });
     try {
@@ -108,6 +104,8 @@ class _BonDetailScreenState extends State<BonDetailScreen> {
         _loadAddress(),
         _loadContact(),
         _loadHours(),
+        _loadSignature(),
+        _loadCompleted(),
       ]);
     } catch (e) {
       if (mounted) setState(() => _error = e.toString());
@@ -115,6 +113,12 @@ class _BonDetailScreenState extends State<BonDetailScreen> {
       if (mounted) setState(() => _loading = false);
     }
   }
+
+  /// Pull-to-refresh: reloads everything (parts, address, contact) without
+  /// swapping the screen to the full-page spinner — in particular this is
+  /// how the "Uren & km" hours count picks up hours registered elsewhere
+  /// (e.g. via "Werk afronden") without leaving and re-opening this screen.
+  Future<void> _onRefresh() => _load(showLoading: false);
 
   Future<void> _loadParts() async {
     final resp = await ApiClient.instance.dio.get(
@@ -135,7 +139,10 @@ class _BonDetailScreenState extends State<BonDetailScreen> {
         taken.add(p['id'].toString());
       }
     }
-    final extrasRaw = prefs.getString('extra_parts_${_order.id}') ?? '[]';
+    // Same key ExtraMaterialsScreen and PartsListScreen persist extras
+    // under — this used to read a different, never-written key, so the
+    // "Extra materiaal" task always showed a count of 0.
+    final extrasRaw = prefs.getString('extra_scanned_${_order.id}') ?? '[]';
     final extrasCount = (jsonDecode(extrasRaw) as List).length;
     final confirmed = prefs.getBool('parts_confirmed_${_order.id}') ?? false;
 
@@ -149,10 +156,19 @@ class _BonDetailScreenState extends State<BonDetailScreen> {
   }
 
   Future<void> _loadHours() async {
-    final times = await PlanningRepository.instance.fetchProjectTimes(
-      _order.id,
-    );
-    if (mounted) setState(() => _projectTimes = times);
+    final total = await HoursDraftService.instance.localTotalHours(_order.id);
+    if (mounted) setState(() => _totalUrenGeregistreerd = total);
+  }
+
+  Future<void> _loadSignature() async {
+    final bytes = await SignatureDraftService.instance.load(_order.id);
+    if (mounted) setState(() => _signatureBytes = bytes);
+  }
+
+  Future<void> _loadCompleted() async {
+    final prefs = await SharedPreferences.getInstance();
+    final completed = prefs.getBool(bonCompletedKey(_order.id)) ?? false;
+    if (mounted) setState(() => _isCompleted = completed);
   }
 
   Future<void> _loadAddress() async {
@@ -270,15 +286,58 @@ class _BonDetailScreenState extends State<BonDetailScreen> {
   }
 
   Future<void> _openHoursWeek() async {
-    final submittedTotal = await Navigator.of(context).push<double>(
-      CupertinoPageRoute<double>(
+    final saved = await Navigator.of(context).push<bool>(
+      CupertinoPageRoute<bool>(
         builder: (_) => HoursWeekScreen(initialOrder: _order),
       ),
     );
-    if (submittedTotal != null && mounted) {
-      setState(() => _optimisticHoursOverride = submittedTotal);
+    if (!mounted) return;
+    await _loadHours();
+    if (saved == true && mounted) _showBanner('Uren opgeslagen');
+  }
+
+  Future<void> _openSignaturePad() async {
+    final bytes = await Navigator.of(context).push<Uint8List>(
+      CupertinoPageRoute<Uint8List>(
+        builder: (_) => SignaturePadScreen(initialSignature: _signatureBytes),
+      ),
+    );
+    if (bytes == null || !mounted) return;
+    await SignatureDraftService.instance.save(_order.id, bytes);
+    if (!mounted) return;
+    setState(() => _signatureBytes = bytes);
+    _showBanner('Handtekening opgeslagen');
+  }
+
+  void _showBanner(String text) {
+    _bannerTimer?.cancel();
+    setState(() => _bannerText = text);
+    _bannerTimer = Timer(const Duration(seconds: 2), () {
+      if (mounted) setState(() => _bannerText = null);
+    });
+  }
+
+  /// Opens the "Werk afronden" summary screen, which publishes this bon's
+  /// locally-saved hours to Ridder in one go.
+  Future<void> _openWorkCompletion() async {
+    final published = await Navigator.of(context).push<bool>(
+      CupertinoPageRoute<bool>(
+        builder: (_) => WorkCompletionScreen(
+          order: _order,
+          totalUrenGeregistreerd: _totalUrenGeregistreerd,
+          signatureBytes: _signatureBytes,
+        ),
+      ),
+    );
+    if (!mounted) return;
+    // The bon is finished — bubble the result up to the job order list
+    // instead of staying here, so it can show its own confirmation and
+    // mark this bon as completed.
+    if (published == true) {
+      Navigator.of(context).pop(true);
+      return;
     }
-    if (mounted) _loadHours();
+    _loadHours();
   }
 
   void _showComingSoon(String feature) {
@@ -339,6 +398,7 @@ class _BonDetailScreenState extends State<BonDetailScreen> {
           CustomScrollView(
             controller: _scrollCtrl,
             slivers: [
+              CupertinoSliverRefreshControl(onRefresh: _onRefresh),
               if (_loading)
                 const SliverFillRemaining(
                   child: Center(child: CupertinoActivityIndicator()),
@@ -434,19 +494,22 @@ class _BonDetailScreenState extends State<BonDetailScreen> {
                       partsConfirmed: _partsConfirmed,
                       extraCount: _extraCount,
                       totalUrenGeregistreerd: _totalUrenGeregistreerd,
+                      hasSignature: _signatureBytes != null,
+                      isCompleted: _isCompleted,
                       onPick: () => _push(
                         PartsListScreen(order: order),
                         refreshParts: true,
                       ),
                       onUren: _openHoursWeek,
                       onExtra: () => _push(
-                        PartsListScreen(order: order),
+                        ExtraMaterialsScreen(order: order),
                         refreshParts: true,
                       ),
                       onDeclaraties: () =>
                           _push(DeclarationsScreen(order: order)),
                       onRapport: () => _push(WorkReportScreen(order: order)),
-                      onTekenen: () => _showComingSoon('Klantgoedkeuring'),
+                      onTekenen: _openSignaturePad,
+                      onWerkAfronden: _openWorkCompletion,
                     ),
                   ),
                 ),
@@ -537,6 +600,64 @@ class _BonDetailScreenState extends State<BonDetailScreen> {
             height: 0.5,
             child: Container(
               color: isDark ? const Color(0xFF38383A) : const Color(0xFFD1D1D6),
+            ),
+          ),
+          // Banner die kort verschijnt na het opslaan van uren of handtekening
+          AnimatedPositioned(
+            duration: const Duration(milliseconds: 300),
+            curve: Curves.easeOutBack,
+            top: _bannerText != null ? 12 : -80,
+            left: 16,
+            right: 16,
+            child: AnimatedOpacity(
+              duration: const Duration(milliseconds: 200),
+              opacity: _bannerText != null ? 1 : 0,
+              child: _SavedBanner(text: _bannerText ?? ''),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// ─── Saved banner ──────────────────────────────────────────────────────────────
+
+class _SavedBanner extends StatelessWidget {
+  final String text;
+  const _SavedBanner({required this.text});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+      decoration: BoxDecoration(
+        color: const Color(0xFF34C759),
+        borderRadius: BorderRadius.circular(14),
+        boxShadow: [
+          BoxShadow(
+            color: CupertinoColors.black.withValues(alpha: 0.15),
+            blurRadius: 12,
+            offset: const Offset(0, 4),
+          ),
+        ],
+      ),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.center,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const Icon(
+            CupertinoIcons.checkmark_alt_circle_fill,
+            size: 18,
+            color: CupertinoColors.white,
+          ),
+          const SizedBox(width: 8),
+          Text(
+            text,
+            style: const TextStyle(
+              fontSize: 14,
+              fontWeight: FontWeight.w600,
+              color: CupertinoColors.white,
             ),
           ),
         ],
@@ -711,29 +832,140 @@ class _WarningCard extends StatelessWidget {
 String _fmtUren(double v) =>
     v == v.truncateToDouble() ? v.toInt().toString() : v.toStringAsFixed(1);
 
+/// Builds the seven [_TaskItem]s shown in [_TaskGrid].
+List<_TaskItem> _buildTaskItems({
+  required int aantalOpenPick,
+  required bool partsConfirmed,
+  required int extraCount,
+  required double totalUrenGeregistreerd,
+  required bool hasSignature,
+  required bool isCompleted,
+  required VoidCallback onPick,
+  required VoidCallback onUren,
+  required VoidCallback onExtra,
+  required VoidCallback onDeclaraties,
+  required VoidCallback onRapport,
+  required VoidCallback onTekenen,
+  required VoidCallback onWerkAfronden,
+}) => [
+  _TaskItem(
+    iconBg: const Color(0xFFFFF4E0),
+    icon: CupertinoIcons.cube_box,
+    iconColor: const Color(0xFFFF9500),
+    title: 'Artikelen picken',
+    subtitle: partsConfirmed
+        ? 'Bevestigd'
+        : aantalOpenPick > 0
+        ? '$aantalOpenPick nog te bevestigen'
+        : 'Alles bevestigd',
+    badge: partsConfirmed ? null : (aantalOpenPick > 0 ? aantalOpenPick : null),
+    done: partsConfirmed || aantalOpenPick == 0,
+    locked: false,
+    onTap: onPick,
+  ),
+  _TaskItem(
+    iconBg: const Color(0xFFE6F9EC),
+    icon: CupertinoIcons.timer,
+    iconColor: const Color(0xFF34C759),
+    title: 'Uren & km',
+    subtitle: totalUrenGeregistreerd > 0
+        ? '${_fmtUren(totalUrenGeregistreerd)}u geregistreerd'
+        : 'Nog niets geregistreerd',
+    done: totalUrenGeregistreerd > 0,
+    locked: false,
+    onTap: onUren,
+  ),
+  _TaskItem(
+    iconBg: const Color(0xFFE3F0FF),
+    icon: CupertinoIcons.add_circled,
+    iconColor: const Color(0xFF007AFF),
+    title: 'Extra materiaal',
+    subtitle: 'Nog niet beschikbaar',
+    done: false,
+    locked: true,
+    onTap: null,
+  ),
+  _TaskItem(
+    iconBg: const Color(0xFFE8EBF5),
+    icon: CupertinoIcons.doc_text,
+    iconColor: const Color(0xFF2C3E6B),
+    title: 'Kosten & bonnen',
+    subtitle: 'Nog niet beschikbaar',
+    done: false,
+    locked: true,
+    onTap: null,
+  ),
+  _TaskItem(
+    iconBg: const Color(0xFFEDE8F5),
+    icon: CupertinoIcons.pencil_outline,
+    iconColor: const Color(0xFF5856D6),
+    title: 'Rapport schrijven',
+    subtitle: 'Nog niet beschikbaar',
+    done: false,
+    locked: true,
+    onTap: null,
+  ),
+  _TaskItem(
+    iconBg: const Color(0xFFE6F9EC),
+    icon: CupertinoIcons.signature,
+    iconColor: const Color(0xFF34C759),
+    title: 'Klant laten tekenen',
+    subtitle: hasSignature
+        ? 'Handtekening vastgelegd'
+        : totalUrenGeregistreerd > 0
+        ? 'Tik om handtekening te verzamelen'
+        : 'Beschikbaar zodra uren zijn ingevuld',
+    done: hasSignature,
+    locked: totalUrenGeregistreerd == 0,
+    onTap: totalUrenGeregistreerd > 0 ? onTekenen : null,
+  ),
+  _TaskItem(
+    iconBg: const Color(0xFFFFE9DE),
+    icon: CupertinoIcons.flag,
+    iconColor: const Color(0xFFFF6B2B),
+    title: 'Werk afronden',
+    subtitle: isCompleted
+        ? 'Gepubliceerd'
+        : totalUrenGeregistreerd > 0 && hasSignature
+        ? 'Bekijk de samenvatting en publiceer de uren'
+        : 'Beschikbaar zodra uren en handtekening zijn ingevuld',
+    done: isCompleted,
+    locked: !isCompleted && (totalUrenGeregistreerd == 0 || !hasSignature),
+    onTap: isCompleted || (totalUrenGeregistreerd > 0 && hasSignature)
+        ? onWerkAfronden
+        : null,
+  ),
+];
+
 class _TaskGrid extends StatelessWidget {
   final int aantalOpenPick;
   final bool partsConfirmed;
   final int extraCount;
   final double totalUrenGeregistreerd;
+  final bool hasSignature;
+  final bool isCompleted;
   final VoidCallback onPick;
   final VoidCallback onUren;
   final VoidCallback onExtra;
   final VoidCallback onDeclaraties;
   final VoidCallback onRapport;
   final VoidCallback onTekenen;
+  final VoidCallback onWerkAfronden;
 
   const _TaskGrid({
     required this.aantalOpenPick,
     required this.partsConfirmed,
     required this.extraCount,
     required this.totalUrenGeregistreerd,
+    required this.hasSignature,
+    required this.isCompleted,
     required this.onPick,
     required this.onUren,
     required this.onExtra,
     required this.onDeclaraties,
     required this.onRapport,
     required this.onTekenen,
+    required this.onWerkAfronden,
   });
 
   @override
@@ -744,81 +976,21 @@ class _TaskGrid extends StatelessWidget {
         : CupertinoColors.systemBackground;
     final divider = isDark ? const Color(0xFF38383A) : const Color(0xFFE5E5EA);
 
-    final items = [
-      _TaskItem(
-        iconBg: const Color(0xFFFFF4E0),
-        icon: CupertinoIcons.cube_box,
-        iconColor: const Color(0xFFFF9500),
-        title: 'Artikelen picken',
-        subtitle: partsConfirmed
-            ? 'Bevestigd'
-            : aantalOpenPick > 0
-            ? '$aantalOpenPick nog te bevestigen'
-            : 'Alles bevestigd',
-        badge: partsConfirmed
-            ? null
-            : (aantalOpenPick > 0 ? aantalOpenPick : null),
-        done: partsConfirmed || aantalOpenPick == 0,
-        locked: false,
-        onTap: onPick,
-      ),
-      _TaskItem(
-        iconBg: const Color(0xFFE6F9EC),
-        icon: CupertinoIcons.timer,
-        iconColor: const Color(0xFF34C759),
-        title: 'Uren & km',
-        subtitle: totalUrenGeregistreerd > 0
-            ? '${_fmtUren(totalUrenGeregistreerd)}u geregistreerd'
-            : 'Nog niets geregistreerd',
-        done: totalUrenGeregistreerd > 0,
-        locked: false,
-        onTap: onUren,
-      ),
-      _TaskItem(
-        iconBg: const Color(0xFFE3F0FF),
-        icon: CupertinoIcons.add_circled,
-        iconColor: const Color(0xFF007AFF),
-        title: 'Extra materiaal',
-        subtitle: extraCount > 0
-            ? '$extraCount extra toegevoegd'
-            : 'Voeg extra artikelen toe',
-        done: false,
-        locked: false,
-        onTap: onExtra,
-      ),
-      _TaskItem(
-        iconBg: const Color(0xFFE8EBF5),
-        icon: CupertinoIcons.doc_text,
-        iconColor: const Color(0xFF2C3E6B),
-        title: 'Kosten & bonnen',
-        subtitle: 'Scan een bonnetje',
-        done: false,
-        locked: false,
-        onTap: onDeclaraties,
-      ),
-      _TaskItem(
-        iconBg: const Color(0xFFEDE8F5),
-        icon: CupertinoIcons.pencil_outline,
-        iconColor: const Color(0xFF5856D6),
-        title: 'Rapport schrijven',
-        subtitle: 'Schrijf een servicerapport',
-        done: false,
-        locked: false,
-        onTap: onRapport,
-      ),
-      _TaskItem(
-        iconBg: const Color(0xFFE6F9EC),
-        icon: CupertinoIcons.signature,
-        iconColor: const Color(0xFF34C759),
-        title: 'Klant laten tekenen',
-        subtitle: totalUrenGeregistreerd > 0
-            ? 'Tik om handtekening te verzamelen'
-            : 'Beschikbaar zodra uren zijn ingevuld',
-        done: false,
-        locked: totalUrenGeregistreerd == 0,
-        onTap: totalUrenGeregistreerd > 0 ? onTekenen : null,
-      ),
-    ];
+    final items = _buildTaskItems(
+      aantalOpenPick: aantalOpenPick,
+      partsConfirmed: partsConfirmed,
+      extraCount: extraCount,
+      totalUrenGeregistreerd: totalUrenGeregistreerd,
+      hasSignature: hasSignature,
+      isCompleted: isCompleted,
+      onPick: onPick,
+      onUren: onUren,
+      onExtra: onExtra,
+      onDeclaraties: onDeclaraties,
+      onRapport: onRapport,
+      onTekenen: onTekenen,
+      onWerkAfronden: onWerkAfronden,
+    );
 
     return Container(
       decoration: BoxDecoration(
@@ -916,46 +1088,63 @@ class _TaskItem extends StatelessWidget {
             ),
           ),
           const SizedBox(width: 10),
-          if (badge != null)
-            Container(
-              constraints: const BoxConstraints(minWidth: 22),
-              padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
-              decoration: BoxDecoration(
-                color: const Color(0xFFFF9500),
-                borderRadius: BorderRadius.circular(11),
-              ),
-              child: Text(
-                '$badge',
-                textAlign: TextAlign.center,
-                style: const TextStyle(
-                  fontSize: 12,
-                  fontWeight: FontWeight.w700,
-                  color: Color(0xFFFFFFFF),
-                ),
-              ),
-            )
-          else if (done)
-            Container(
-              width: 20,
-              height: 20,
-              decoration: const BoxDecoration(
-                color: Color(0xFF34C759),
-                shape: BoxShape.circle,
-              ),
-              child: const Icon(
-                CupertinoIcons.checkmark,
-                size: 11,
-                color: Color(0xFFFFFFFF),
-              ),
-            )
-          else if (locked)
-            const Icon(CupertinoIcons.lock, size: 14, color: Color(0xFFAAAAAA))
-          else
-            Icon(
-              CupertinoIcons.chevron_right,
-              size: 14,
-              color: CupertinoColors.tertiaryLabel.resolveFrom(context),
-            ),
+          AnimatedSwitcher(
+            duration: const Duration(milliseconds: 350),
+            switchInCurve: Curves.elasticOut,
+            switchOutCurve: Curves.easeIn,
+            transitionBuilder: (child, animation) =>
+                ScaleTransition(scale: animation, child: child),
+            child: badge != null
+                ? Container(
+                    key: const ValueKey('badge'),
+                    constraints: const BoxConstraints(minWidth: 22),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 7,
+                      vertical: 3,
+                    ),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFFFF9500),
+                      borderRadius: BorderRadius.circular(11),
+                    ),
+                    child: Text(
+                      '$badge',
+                      textAlign: TextAlign.center,
+                      style: const TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w700,
+                        color: Color(0xFFFFFFFF),
+                      ),
+                    ),
+                  )
+                : done
+                ? Container(
+                    key: const ValueKey('done'),
+                    width: 20,
+                    height: 20,
+                    decoration: const BoxDecoration(
+                      color: Color(0xFF34C759),
+                      shape: BoxShape.circle,
+                    ),
+                    child: const Icon(
+                      CupertinoIcons.checkmark,
+                      size: 11,
+                      color: Color(0xFFFFFFFF),
+                    ),
+                  )
+                : locked
+                ? const Icon(
+                    CupertinoIcons.lock,
+                    key: ValueKey('locked'),
+                    size: 14,
+                    color: Color(0xFFAAAAAA),
+                  )
+                : Icon(
+                    CupertinoIcons.chevron_right,
+                    key: const ValueKey('chevron'),
+                    size: 14,
+                    color: CupertinoColors.tertiaryLabel.resolveFrom(context),
+                  ),
+          ),
         ],
       ),
     );

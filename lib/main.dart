@@ -70,7 +70,7 @@ class MainTabView extends StatelessWidget {
   Widget build(BuildContext context) {
     return CupertinoTabScaffold(
       tabBar: CupertinoTabBar(
-        iconSize: 24,
+        iconSize: 20,
         items: const [
           BottomNavigationBarItem(
             icon: Icon(CupertinoIcons.house),

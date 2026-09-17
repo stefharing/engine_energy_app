@@ -3,7 +3,6 @@ import 'package:flutter/cupertino.dart';
 
 import '../core/api/api_client.dart';
 import '../core/auth/auth_service.dart';
-import '../core/auth/current_user.dart';
 import '../features/planning/screens/hours_week_screen.dart';
 import '../widgets/engine_logo.dart';
 import '../widgets/nav_border.dart';
@@ -38,41 +37,23 @@ class _DashboardScreenState extends State<DashboardScreen> {
       _error = null;
     });
     try {
-      final dio = ApiClient.instance.dio;
-
-      // 1. Find the employee matching the current user
-      final empResponse = await dio.get(
-        '/hours/employees',
-        queryParameters: {'page': 1, 'size': 200, 'sort': 'recordtag.asc'},
-      );
-      final employees = (empResponse.data['data'] as List<dynamic>)
-          .cast<Map<String, dynamic>>();
-
-      Map<String, dynamic>? currentEmployee;
-      for (final e in employees) {
-        final name = (e['recordtag'] as String? ?? '').toLowerCase();
-        if (name == currentUserName.toLowerCase()) {
-          currentEmployee = e;
-          break;
-        }
-      }
-
-      if (currentEmployee == null) {
+      final employeeId = AuthService.instance.currentMechanicId;
+      if (employeeId == null) {
         setState(() {
-          _error = 'Medewerker "$currentUserName" niet gevonden in de API.';
+          _error = 'Je bent niet ingelogd.';
           _loading = false;
         });
         return;
       }
 
-      final employeeId = currentEmployee['id'] as int;
+      final dio = ApiClient.instance.dio;
 
-      // 2. Compute current ISO year-week number (e.g. 202616)
+      // Compute current ISO year-week number (e.g. 202616)
       final now = DateTime.now();
       final yearWeek = _isoYearWeek(now);
 
-      // 3. Fetch projecttimes for this week — single filter, no quotes needed.
-      //    Then filter client-side by employee so Dio's query encoding can't break it.
+      // Fetch projecttimes for this week — single filter, no quotes needed.
+      // Then filter client-side by employee so Dio's query encoding can't break it.
       final hoursResponse = await dio.get(
         '/hours/projecttimes',
         queryParameters: {
