@@ -80,6 +80,21 @@ class ServiceRemoteJobOrderRepository {
         '[diag] GET $url -> ${response.statusCode} '
         'body=${_shortBody(response.data)}',
       );
+      // Temporary diagnostic: `_shortBody` truncates at 800 chars, well
+      // before `detailItems`/`detailMisc` in the full body — print those
+      // two fields on their own so we can see whether a previously-POSTed
+      // material line actually persisted (real id) or never landed at all.
+      if (response.data is Map) {
+        final data = response.data as Map;
+        debugPrint(
+          '[diag] GET $url detailItems=${data['detailItems']}',
+          wrapWidth: 1024,
+        );
+        debugPrint(
+          '[diag] GET $url detailMisc=${data['detailMisc']}',
+          wrapWidth: 1024,
+        );
+      }
       if (response.data is! Map) {
         throw JobOrderDetailFetchFailed(response.statusCode, response.data);
       }
@@ -196,13 +211,19 @@ class ServiceRemoteJobOrderRepository {
       throw JobOrderSubmissionAppointmentCloseFailed(e.toString());
     }
 
-    final body = buildServiceRemoteJobOrderSubmission(
-      rawJobOrder: jobOrder.raw,
-      appointmentId: appointmentId,
-      hours: hours,
-      uniqueId: _uuid.v4(),
-      extras: extras,
-    );
+    final Map<String, dynamic> body;
+    try {
+      body = buildServiceRemoteJobOrderSubmission(
+        rawJobOrder: jobOrder.raw,
+        appointmentId: appointmentId,
+        employeeId: employeeId,
+        hours: hours,
+        uniqueId: _uuid.v4(),
+        extras: extras,
+      );
+    } catch (e) {
+      throw JobOrderSubmissionPostFailed('Body opbouwen mislukt: $e');
+    }
 
     bool posted;
     try {

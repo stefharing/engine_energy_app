@@ -64,6 +64,14 @@ class _PartsListScreenState extends State<PartsListScreen> {
     return [...incomplete, ...complete];
   }
 
+  /// Extras whose code doesn't match a planned part — used purely to avoid
+  /// showing the same article twice when [UsedMaterialsScreen] has seeded
+  /// the shared extras list with an already-planned, already-picked part.
+  List<ScannedExtra> get _extrasNotInParts {
+    final partCodes = _parts.map(_partCode).toSet();
+    return _extras.where((e) => !partCodes.contains(e.code.toUpperCase())).toList();
+  }
+
   int get _totalExpected => _parts.fold(0, (s, p) => s + _expectedQty(p));
 
   int get _totalScannedQty => _parts.fold(0, (s, p) {
@@ -594,7 +602,7 @@ class _PartsListScreenState extends State<PartsListScreen> {
                           ]),
                         ),
                       ),
-                      if (_extras.isNotEmpty) ...[
+                      if (_extrasNotInParts.isNotEmpty) ...[
                         SliverToBoxAdapter(
                           child: Padding(
                             padding: const EdgeInsets.fromLTRB(20, 16, 16, 8),
@@ -613,7 +621,7 @@ class _PartsListScreenState extends State<PartsListScreen> {
                           padding: const EdgeInsets.fromLTRB(16, 0, 16, 0),
                           sliver: SliverList(
                             delegate: SliverChildListDelegate([
-                              for (final e in _extras)
+                              for (final e in _extrasNotInParts)
                                 _ExtraCard(extra: e, isDark: isDark),
                             ]),
                           ),

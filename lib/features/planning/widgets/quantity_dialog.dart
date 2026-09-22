@@ -2,7 +2,7 @@ import 'package:flutter/cupertino.dart';
 import 'package:flutter/services.dart';
 
 /// Prompts for a quantity ("stuks") via [QuantityDialog] — shared between
-/// [PartsListScreen] and [ExtraMaterialsScreen], both of which need to ask
+/// [PartsListScreen] and [UsedMaterialsScreen], both of which need to ask
 /// "how many?" after a scan or search match.
 Future<int?> promptQuantity(
   BuildContext context, {

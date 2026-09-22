@@ -256,6 +256,19 @@ class PlanningRepository {
     }
   }
 
+  /// Fetches the full catalog record for an item, including `itemunit` —
+  /// which `/production/joborderdetails`' own embedded `item` subfield
+  /// doesn't include, but which [ScannedExtra.unitId] (and thus the `wip`
+  /// line built from it) needs.
+  Future<Map<String, dynamic>?> fetchItem(int id) async {
+    try {
+      final response = await _dio.get('/itemmanagement/items/$id');
+      return response.data as Map<String, dynamic>?;
+    } catch (_) {
+      return null;
+    }
+  }
+
   Future<Map<String, dynamic>?> fetchServiceObject(String id) async {
     try {
       final response = await _dio.get('/service/serviceobjects/$id');

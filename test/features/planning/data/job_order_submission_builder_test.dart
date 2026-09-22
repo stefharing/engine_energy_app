@@ -28,6 +28,7 @@ void main() {
       final body = buildServiceRemoteJobOrderSubmission(
         rawJobOrder: baseJobOrder(),
         appointmentId: 112,
+        employeeId: 6,
         hours: [entry()],
         uniqueId: 'submission-guid',
       );
@@ -53,6 +54,7 @@ void main() {
         },
       ),
       appointmentId: 112,
+      employeeId: 6,
       hours: [entry()],
       uniqueId: 'x',
       extras: [
@@ -93,6 +95,7 @@ void main() {
         },
       ),
       appointmentId: 112,
+      employeeId: 6,
       hours: [entry()],
       uniqueId: 'x',
       extras: [
@@ -133,6 +136,7 @@ void main() {
         },
       ),
       appointmentId: 112,
+      employeeId: 6,
       hours: const [],
       uniqueId: 'x',
       extras: [
@@ -151,6 +155,7 @@ void main() {
     final body = buildServiceRemoteJobOrderSubmission(
       rawJobOrder: baseJobOrder(extra: {'readyForSignature': true}),
       appointmentId: 112,
+      employeeId: 6,
       hours: [entry()],
       uniqueId: 'x',
     );
@@ -171,6 +176,7 @@ void main() {
       final body = buildServiceRemoteJobOrderSubmission(
         rawJobOrder: baseJobOrder(),
         appointmentId: 112,
+        employeeId: 6,
         hours: [earlier, later],
         uniqueId: 'x',
       );
@@ -182,6 +188,7 @@ void main() {
     final body = buildServiceRemoteJobOrderSubmission(
       rawJobOrder: baseJobOrder(),
       appointmentId: 112,
+      employeeId: 6,
       hours: [entry()],
       uniqueId: 'x',
     );
@@ -191,6 +198,7 @@ void main() {
     final passthrough = buildServiceRemoteJobOrderSubmission(
       rawJobOrder: baseJobOrder(extra: {'followup': true, 'onHold': true}),
       appointmentId: 112,
+      employeeId: 6,
       hours: [entry()],
       uniqueId: 'x',
     );
@@ -208,6 +216,7 @@ void main() {
           },
         ),
         appointmentId: 112,
+        employeeId: 6,
         hours: [entry()],
         uniqueId: 'x',
       );
@@ -223,6 +232,7 @@ void main() {
         },
       ),
       appointmentId: 112,
+      employeeId: 6,
       hours: [entry()],
       uniqueId: 'x',
     );
@@ -235,6 +245,7 @@ void main() {
       final body = buildServiceRemoteJobOrderSubmission(
         rawJobOrder: baseJobOrder(),
         appointmentId: 112,
+        employeeId: 6,
         hours: [entry()],
         uniqueId: 'x',
       );
@@ -284,6 +295,7 @@ void main() {
           },
         ),
         appointmentId: 112,
+        employeeId: 6,
         hours: [entry()],
         uniqueId: 'x',
       );
@@ -305,6 +317,7 @@ void main() {
           },
         ),
         appointmentId: 112,
+        employeeId: 6,
         hours: [entry()],
         uniqueId: 'x',
       );
@@ -328,6 +341,7 @@ void main() {
         },
       ),
       appointmentId: 112,
+      employeeId: 6,
       hours: [entry()],
       uniqueId: 'x',
     );
@@ -344,6 +358,7 @@ void main() {
           },
         ),
         appointmentId: 112,
+        employeeId: 6,
         hours: [entry()],
         uniqueId: 'x',
       );
@@ -364,6 +379,7 @@ void main() {
       final body = buildServiceRemoteJobOrderSubmission(
         rawJobOrder: baseJobOrder(),
         appointmentId: 112,
+        employeeId: 6,
         hours: [entry()],
         uniqueId: 'x',
       );
@@ -379,6 +395,7 @@ void main() {
     final body = buildServiceRemoteJobOrderSubmission(
       rawJobOrder: baseJobOrder(extra: {'htmlFile': 'placeholder.pdf'}),
       appointmentId: 112,
+      employeeId: 6,
       hours: const [],
       uniqueId: 'x',
     );
@@ -395,6 +412,7 @@ void main() {
         },
       ),
       appointmentId: 112,
+      employeeId: 6,
       hours: [entry()],
       uniqueId: 'x',
     );
@@ -413,6 +431,7 @@ void main() {
     buildServiceRemoteJobOrderSubmission(
       rawJobOrder: raw,
       appointmentId: 112,
+      employeeId: 6,
       hours: [entry()],
       uniqueId: 'x',
     );

@@ -13,7 +13,7 @@ import '../data/signature_draft_service.dart';
 import '../models/job_order.dart';
 import '../models/service_interval.dart';
 import 'declarations_screen.dart';
-import 'extra_materials_screen.dart';
+import 'used_materials_screen.dart';
 import 'hours_week_screen.dart';
 import 'parts_list_screen.dart';
 import 'signature_pad_screen.dart';
@@ -139,7 +139,7 @@ class _BonDetailScreenState extends State<BonDetailScreen> {
         taken.add(p['id'].toString());
       }
     }
-    // Same key ExtraMaterialsScreen and PartsListScreen persist extras
+    // Same key UsedMaterialsScreen and PartsListScreen persist extras
     // under — this used to read a different, never-written key, so the
     // "Extra materiaal" task always showed a count of 0.
     final extrasRaw = prefs.getString('extra_scanned_${_order.id}') ?? '[]';
@@ -502,7 +502,7 @@ class _BonDetailScreenState extends State<BonDetailScreen> {
                       ),
                       onUren: _openHoursWeek,
                       onExtra: () => _push(
-                        ExtraMaterialsScreen(order: order),
+                        UsedMaterialsScreen(order: order),
                         refreshParts: true,
                       ),
                       onDeclaraties: () =>
@@ -879,11 +879,13 @@ List<_TaskItem> _buildTaskItems({
     iconBg: const Color(0xFFE3F0FF),
     icon: CupertinoIcons.add_circled,
     iconColor: const Color(0xFF007AFF),
-    title: 'Extra materiaal',
-    subtitle: 'Nog niet beschikbaar',
-    done: false,
-    locked: true,
-    onTap: null,
+    title: 'Gebruikt materiaal',
+    subtitle: extraCount > 0
+        ? '$extraCount ${extraCount == 1 ? 'artikel' : 'artikelen'} geregistreerd'
+        : 'Nog niets geregistreerd',
+    done: extraCount > 0,
+    locked: false,
+    onTap: onExtra,
   ),
   _TaskItem(
     iconBg: const Color(0xFFE8EBF5),

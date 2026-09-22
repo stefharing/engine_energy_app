@@ -155,7 +155,10 @@
       "Bash(osascript -e 'tell application \"engine_energy_app\" to quit')",
       "Bash(rm -f /tmp/flutter_run.log)",
       "Bash(rm -rf /tmp/ee_screens)",
-      "Bash(grep -n 'Stap \\\\|StepProgress\\\\|van $total\\\\|—' test/features/planning/screens/work_report_screen_test.dart)"
+      "Bash(grep -n 'Stap \\\\|StepProgress\\\\|van $total\\\\|—' test/features/planning/screens/work_report_screen_test.dart)",
+      "Bash(curl -s -G https://api.eciridderiq.com/Engine%20Energy%20B.V./RIQ_80167_1/v2/production/joborderdetails -H 'X-API-KEY: 77d019ae-4738-4e35-9e5f-7c828d06f5af' --data-urlencode page=1 --data-urlencode size=5 --data-urlencode filter=joborder.id[eq]85)",
+      "Bash(curl -s -G https://api.eciridderiq.com/Engine%20Energy%20B.V./RIQ_80167_1/v2/production/joborderdetails -H 'X-API-KEY: 77d019ae-4738-4e35-9e5f-7c828d06f5af' --data-urlencode page=1 --data-urlencode size=3)",
+      "Bash(curl -s https://api.eciridderiq.com/Engine%20Energy%20B.V./RIQ_80167_1/v2/itemmanagement/items/52464 -H 'X-API-KEY: 77d019ae-4738-4e35-9e5f-7c828d06f5af')"
     ]
   }
 }

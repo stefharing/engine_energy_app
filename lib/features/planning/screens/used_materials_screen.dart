@@ -4,30 +4,37 @@ import 'package:flutter/cupertino.dart';
 import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../../../core/api/api_client.dart';
 import '../data/planning_repository.dart';
 import '../models/job_order.dart';
 import '../models/scanned_extra.dart';
+import '../widgets/quantity_dialog.dart';
 import 'magazijn_search_screen.dart';
 
-/// Registers materials used on a bon that weren't on the office-planned
-/// parts list — opened from the "Extra materiaal" task on [BonDetailScreen].
-/// Adding goes through [MagazijnSearchScreen] (see [ScannedExtra]), which
-/// already covers search, barcode scanning and asking for a quantity in one
-/// flow. Persists to the same `extra_scanned_<orderId>` draft [PartsListScreen]
-/// uses, so both screens agree on what's been added — but this screen has no
-/// office-planned parts of its own to pick against, so every added article
-/// is an extra.
-class ExtraMaterialsScreen extends StatefulWidget {
+/// Registers materials actually consumed on a bon — both articles the
+/// office already planned and set to be picked (via [PartsListScreen],
+/// seeded in automatically here with their picked quantity) and anything
+/// picked in the field that wasn't planned at all. Adding goes through
+/// [MagazijnSearchScreen] (see [ScannedExtra]), which already covers
+/// search, barcode scanning and asking for a quantity in one flow.
+/// Persists to the same `extra_scanned_<orderId>` draft [PartsListScreen]
+/// uses, so both screens agree on what's been added.
+///
+/// A picked article whose used quantity ends up different from the picked
+/// quantity is registered here as its own, separate line rather than
+/// editing the office-created Ridder line — see the module doc for why.
+class UsedMaterialsScreen extends StatefulWidget {
   final ServiceOrder order;
 
-  const ExtraMaterialsScreen({super.key, required this.order});
+  const UsedMaterialsScreen({super.key, required this.order});
 
   @override
-  State<ExtraMaterialsScreen> createState() => _ExtraMaterialsScreenState();
+  State<UsedMaterialsScreen> createState() => _UsedMaterialsScreenState();
 }
 
-class _ExtraMaterialsScreenState extends State<ExtraMaterialsScreen> {
+class _UsedMaterialsScreenState extends State<UsedMaterialsScreen> {
   List<ScannedExtra> _extras = [];
+  Map<String, int> _pickedByCode = {};
   bool _loading = true;
   String? _error;
   bool _showNavTitle = false;
@@ -36,6 +43,13 @@ class _ExtraMaterialsScreenState extends State<ExtraMaterialsScreen> {
   String? _toastMessage;
 
   String get _orderId => widget.order.id;
+
+  static String _partCode(Map<String, dynamic> p) {
+    final item = p['item'] as Map<String, dynamic>?;
+    return (item?['code'] as String? ?? p['code'] as String? ?? '')
+        .trim()
+        .toUpperCase();
+  }
 
   @override
   void initState() {
@@ -53,6 +67,10 @@ class _ExtraMaterialsScreenState extends State<ExtraMaterialsScreen> {
     super.dispose();
   }
 
+  /// Loads the shared extras draft, then seeds it (once per part, tracked
+  /// via `used_material_seeded_<orderId>`) with the office-planned parts
+  /// that have already been picked — so the mechanic sees them here ready
+  /// to confirm or adjust, without having to re-add them by hand.
   Future<void> _load() async {
     setState(() {
       _loading = true;
@@ -60,16 +78,78 @@ class _ExtraMaterialsScreenState extends State<ExtraMaterialsScreen> {
     });
     try {
       final prefs = await SharedPreferences.getInstance();
-      final raw = prefs.getString('extra_scanned_$_orderId') ?? '[]';
-      final extras = (jsonDecode(raw) as List)
+
+      final response = await ApiClient.instance.dio.get(
+        '/production/joborderdetails',
+        queryParameters: {
+          'page': 1,
+          'size': 200,
+          'filter': 'joborder.id[eq]$_orderId',
+        },
+      );
+      final all = (response.data['data'] as List).cast<Map<String, dynamic>>();
+      final parts = all.where((e) => e['joborderdetailitem'] != null).toList();
+
+      final countsRaw = prefs.getString('scanned_counts_$_orderId') ?? '{}';
+      final countsMap = (jsonDecode(countsRaw) as Map<String, dynamic>).map(
+        (k, v) => MapEntry(k, (v as num).toInt()),
+      );
+
+      final extrasRaw = prefs.getString('extra_scanned_$_orderId') ?? '[]';
+      final extras = (jsonDecode(extrasRaw) as List)
           .cast<Map<String, dynamic>>()
           .map(ScannedExtra.fromJson)
           .toList();
+
+      final seededRaw =
+          prefs.getString('used_material_seeded_$_orderId') ?? '[]';
+      final seeded = (jsonDecode(seededRaw) as List).cast<String>().toSet();
+
+      var extrasChanged = false;
+      var seededChanged = false;
+      final pickedByCode = <String, int>{};
+
+      for (final p in parts) {
+        final partId = p['id'].toString();
+        final pickedQty = countsMap[partId] ?? 0;
+        final code = _partCode(p);
+        if (code.isNotEmpty && pickedQty > 0) pickedByCode[code] = pickedQty;
+
+        if (pickedQty <= 0 || seeded.contains(partId)) continue;
+
+        final alreadyPresent = extras.any(
+          (e) => e.code.toUpperCase() == code,
+        );
+        if (alreadyPresent) {
+          seeded.add(partId);
+          seededChanged = true;
+          continue;
+        }
+
+        final itemId = (p['item'] as Map<String, dynamic>?)?['id'] as int?;
+        if (itemId == null) continue;
+        final fullItem = await PlanningRepository.instance.fetchItem(itemId);
+        if (fullItem == null) continue;
+
+        extras.add(ScannedExtra(item: fullItem, scannedCount: pickedQty));
+        seeded.add(partId);
+        extrasChanged = true;
+        seededChanged = true;
+      }
+
       if (mounted) {
         setState(() {
           _extras = extras;
+          _pickedByCode = pickedByCode;
           _loading = false;
         });
+      }
+      if (extrasChanged) await _saveExtras();
+      if (seededChanged) {
+        await prefs.setString(
+          'used_material_seeded_$_orderId',
+          jsonEncode(seeded.toList()),
+        );
       }
     } catch (e) {
       if (mounted) {
@@ -225,6 +305,43 @@ class _ExtraMaterialsScreenState extends State<ExtraMaterialsScreen> {
     return null;
   }
 
+  /// Update: lets the mechanic correct the registered quantity for [extra].
+  /// A quantity of 0 removes the line, same as [PartsListScreen._manualEntry].
+  Future<void> _editQuantity(ScannedExtra extra) async {
+    final idx = _extras.indexWhere(
+      (e) => e.code.toUpperCase() == extra.code.toUpperCase(),
+    );
+    if (idx < 0) return;
+
+    final qty = await promptQuantity(
+      context,
+      title: extra.isManual ? extra.description : extra.code,
+      subtitle: extra.isManual ? '' : extra.description,
+      defaultQty: extra.scannedCount,
+      minimumQty: 0,
+    );
+    if (qty == null) return;
+
+    setState(() {
+      if (qty == 0) {
+        _extras.removeAt(idx);
+      } else {
+        _extras[idx] = _extras[idx].copyWith(scannedCount: qty);
+      }
+    });
+    await _saveExtras();
+  }
+
+  /// Delete: explicit removal, independent from the quantity dialog.
+  Future<void> _deleteExtra(ScannedExtra extra) async {
+    setState(() {
+      _extras.removeWhere(
+        (e) => e.code.toUpperCase() == extra.code.toUpperCase(),
+      );
+    });
+    await _saveExtras();
+  }
+
   Future<void> _register() async {
     // Extras are already stored locally on every edit. They are included in
     // the Service Remote job-order payload only from "Werk afronden".
@@ -258,7 +375,7 @@ class _ExtraMaterialsScreenState extends State<ExtraMaterialsScreen> {
           opacity: _showNavTitle ? 1.0 : 0.0,
           duration: const Duration(milliseconds: 150),
           child: const Text(
-            'Extra materialen',
+            'Gebruikt materiaal',
             style: TextStyle(
               fontWeight: FontWeight.w600,
               color: CupertinoColors.black,
@@ -281,7 +398,7 @@ class _ExtraMaterialsScreenState extends State<ExtraMaterialsScreen> {
                       child: Padding(
                         padding: EdgeInsets.fromLTRB(16, 20, 16, 0),
                         child: Text(
-                          'Extra materialen',
+                          'Gebruikt materiaal',
                           style: TextStyle(
                             fontSize: 28,
                             fontWeight: FontWeight.w700,
@@ -309,7 +426,13 @@ class _ExtraMaterialsScreenState extends State<ExtraMaterialsScreen> {
                         sliver: SliverList(
                           delegate: SliverChildListDelegate([
                             for (final e in _extras)
-                              _ExtraMaterialCard(extra: e, isDark: isDark),
+                              _UsedMaterialCard(
+                                extra: e,
+                                isDark: isDark,
+                                pickedQty: _pickedByCode[e.code.toUpperCase()],
+                                onTap: () => _editQuantity(e),
+                                onDelete: () => _deleteExtra(e),
+                              ),
                           ]),
                         ),
                       ),
@@ -557,8 +680,8 @@ class _RegisterFooter extends StatelessWidget {
 
 // ─── Empty state ────────────────────────────────────────────────────────────
 
-/// Tappable orange hint card shown while no extra materials have been
-/// registered yet — mirrors [HoursWeekScreen]'s `_EmptyCardsHint`.
+/// Tappable orange hint card shown while no materials have been registered
+/// yet — mirrors [HoursWeekScreen]'s `_EmptyCardsHint`.
 class _EmptyExtrasHint extends StatelessWidget {
   final VoidCallback onTap;
 
@@ -592,7 +715,7 @@ class _EmptyExtrasHint extends StatelessWidget {
             ),
             const SizedBox(height: 12),
             Text(
-              'Geen extra materialen geregistreerd',
+              'Geen materiaal geregistreerd',
               style: TextStyle(
                 fontSize: 14,
                 fontWeight: FontWeight.w600,
@@ -601,7 +724,7 @@ class _EmptyExtrasHint extends StatelessWidget {
             ),
             const SizedBox(height: 2),
             const Text(
-              'Tik om extra materialen toe te voegen',
+              'Tik om materiaal toe te voegen',
               style: TextStyle(fontSize: 12, color: tint),
             ),
           ],
@@ -611,13 +734,22 @@ class _EmptyExtrasHint extends StatelessWidget {
   }
 }
 
-// ─── Extra material card ─────────────────────────────────────────────────────
+// ─── Used material card ───────────────────────────────────────────────────────
 
-class _ExtraMaterialCard extends StatelessWidget {
+class _UsedMaterialCard extends StatelessWidget {
   final ScannedExtra extra;
   final bool isDark;
+  final int? pickedQty;
+  final VoidCallback onTap;
+  final VoidCallback onDelete;
 
-  const _ExtraMaterialCard({required this.extra, required this.isDark});
+  const _UsedMaterialCard({
+    required this.extra,
+    required this.isDark,
+    required this.pickedQty,
+    required this.onTap,
+    required this.onDelete,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -628,84 +760,114 @@ class _ExtraMaterialCard extends StatelessWidget {
         ? const Color(0xFF38383A)
         : const Color(0xFFE5E5EA);
 
-    return Container(
-      margin: const EdgeInsets.only(bottom: 10),
-      padding: const EdgeInsets.all(14),
-      decoration: BoxDecoration(
-        color: cardBg,
-        borderRadius: BorderRadius.circular(14),
-        border: Border.all(color: borderColor),
-      ),
-      child: Row(
-        children: [
-          Container(
-            width: 32,
-            height: 32,
-            decoration: BoxDecoration(
-              color: const Color(0xFF34C759).withValues(alpha: 0.15),
-              shape: BoxShape.circle,
+    return GestureDetector(
+      onTap: onTap,
+      behavior: HitTestBehavior.opaque,
+      child: Container(
+        margin: const EdgeInsets.only(bottom: 10),
+        padding: const EdgeInsets.all(14),
+        decoration: BoxDecoration(
+          color: cardBg,
+          borderRadius: BorderRadius.circular(14),
+          border: Border.all(color: borderColor),
+        ),
+        child: Row(
+          children: [
+            Container(
+              width: 32,
+              height: 32,
+              decoration: BoxDecoration(
+                color: const Color(0xFF34C759).withValues(alpha: 0.15),
+                shape: BoxShape.circle,
+              ),
+              child: const Icon(
+                CupertinoIcons.checkmark,
+                size: 14,
+                color: Color(0xFF34C759),
+              ),
             ),
-            child: const Icon(
-              CupertinoIcons.checkmark,
-              size: 14,
-              color: Color(0xFF34C759),
-            ),
-          ),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  extra.isManual ? extra.description : extra.code,
-                  style: const TextStyle(
-                    fontSize: 15,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-                if (extra.isManual)
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
                   Text(
-                    'Niet gekoppeld aan magazijn',
-                    style: TextStyle(
-                      fontSize: 12,
-                      color: CupertinoColors.tertiaryLabel.resolveFrom(context),
+                    extra.isManual ? extra.description : extra.code,
+                    style: const TextStyle(
+                      fontSize: 15,
+                      fontWeight: FontWeight.w600,
                     ),
-                  )
-                else
-                  Text(
-                    extra.description,
-                    style: TextStyle(
-                      fontSize: 13,
-                      color: CupertinoColors.secondaryLabel.resolveFrom(
-                        context,
+                  ),
+                  if (extra.isManual)
+                    Text(
+                      'Niet gekoppeld aan magazijn',
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: CupertinoColors.tertiaryLabel.resolveFrom(
+                          context,
+                        ),
+                      ),
+                    )
+                  else
+                    Text(
+                      extra.description,
+                      style: TextStyle(
+                        fontSize: 13,
+                        color: CupertinoColors.secondaryLabel.resolveFrom(
+                          context,
+                        ),
                       ),
                     ),
+                  if (pickedQty != null) ...[
+                    const SizedBox(height: 2),
+                    Text(
+                      'Gepickt: $pickedQty stuks',
+                      style: const TextStyle(
+                        fontSize: 11,
+                        fontWeight: FontWeight.w500,
+                        color: Color(0xFFFF9500),
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+            const SizedBox(width: 10),
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.end,
+              children: [
+                Text(
+                  '${extra.scannedCount}',
+                  style: const TextStyle(
+                    fontSize: 15,
+                    fontWeight: FontWeight.w700,
+                    color: Color(0xFF34C759),
                   ),
+                ),
+                Text(
+                  'stuks',
+                  style: TextStyle(
+                    fontSize: 11,
+                    color: CupertinoColors.tertiaryLabel.resolveFrom(context),
+                  ),
+                ),
               ],
             ),
-          ),
-          const SizedBox(width: 10),
-          Column(
-            crossAxisAlignment: CrossAxisAlignment.end,
-            children: [
-              Text(
-                '${extra.scannedCount}',
-                style: const TextStyle(
-                  fontSize: 15,
-                  fontWeight: FontWeight.w700,
-                  color: Color(0xFF34C759),
+            const SizedBox(width: 6),
+            GestureDetector(
+              onTap: onDelete,
+              behavior: HitTestBehavior.opaque,
+              child: Padding(
+                padding: const EdgeInsets.all(4),
+                child: Icon(
+                  CupertinoIcons.delete,
+                  size: 18,
+                  color: CupertinoColors.systemRed.resolveFrom(context),
                 ),
               ),
-              Text(
-                'stuks',
-                style: TextStyle(
-                  fontSize: 11,
-                  color: CupertinoColors.tertiaryLabel.resolveFrom(context),
-                ),
-              ),
-            ],
-          ),
-        ],
+            ),
+          ],
+        ),
       ),
     );
   }

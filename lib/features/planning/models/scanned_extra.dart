@@ -2,7 +2,7 @@
 /// `/itemmanagement/items` catalog record so it can be turned into a real
 /// job order line (`item.id`) when confirmed. Shared between
 /// [PartsListScreen] (extras picked alongside the office-planned parts) and
-/// [ExtraMaterialsScreen] (extras registered on their own) — both persist
+/// [UsedMaterialsScreen] (extras registered on their own) — both persist
 /// to the same `extra_scanned_<orderId>` SharedPreferences key, so a
 /// technician sees the same list from either screen.
 ///
@@ -33,6 +33,8 @@ class ScannedExtra {
       ? item['description'] as String
       : (item['recordtag'] as String? ?? 'Onbekend artikel');
   int get itemId => item['id'] as int;
+  int? get unitId =>
+      (item['itemunit'] as Map<String, dynamic>?)?['id'] as int?;
   int get sawingCode =>
       (item['defaultsawingcode'] as Map<String, dynamic>?)?['choicenumber']
           as int? ??

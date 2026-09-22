@@ -90,8 +90,8 @@ class HoursDraftService {
     final days = await _readDraftDays(orderId);
     final result = <HoursDayBreakdown>[];
     for (final dayEntry in days.entries) {
-      final cards = (dayEntry.value as Map)['cards'] as List<dynamic>? ??
-          const [];
+      final cards =
+          (dayEntry.value as Map)['cards'] as List<dynamic>? ?? const [];
       if (cards.isEmpty) continue;
       final dateParts = dayEntry.key.split('-').map(int.parse).toList();
       result.add(
