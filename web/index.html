@@ -98,6 +98,9 @@
       document.getElementById("splash-branding")?.remove();
       document.body.style.background = "transparent";
     }
+    // Verwijder de splash zodra Flutter het eerste frame tekent
+    // (flutter_native_splash staat in dev_dependencies en doet dit op web niet zelf).
+    window.addEventListener("flutter-first-frame", removeSplashFromWeb);
   </script>
 </head>
 <body>

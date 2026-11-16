@@ -87,7 +87,9 @@ class _QuantityDialogState extends State<QuantityDialog> {
             style: const TextStyle(fontSize: 26, fontWeight: FontWeight.w700),
             placeholder: '0',
             decoration: BoxDecoration(
-              color: CupertinoColors.tertiarySystemBackground,
+              color: CupertinoColors.tertiarySystemBackground.resolveFrom(
+                context,
+              ),
               borderRadius: BorderRadius.circular(8),
             ),
             onSubmitted: (_) => _confirm(),

@@ -13,6 +13,7 @@ import '../data/work_report_snippets.dart';
 import '../data/work_report_storage.dart';
 import '../models/job_order.dart';
 import '../models/work_report_draft.dart';
+import '../../../core/theme/app_colors.dart';
 
 /// Titles for each fillable section of the report, in order. Variant 1d of
 /// the wizard redesign: a completion ring (not a linear bar or dot row), a
@@ -31,10 +32,10 @@ const _stepTitles = [
 /// Capture-only work-report screen for a bon: an overview hub over three
 /// free-text sections, a list of severity-tagged findings, and
 /// photo/document attachments, persisted as a local draft (same
-/// SharedPreferences-backed pattern as `hours_week_screen.dart`). No PDF
-/// generation and no submission to Ridder — that's a deliberately separate
-/// future task, once the right API endpoint is confirmed; "Rapport
-/// opslaan" only saves the draft locally as `status: saved`.
+/// SharedPreferences-backed pattern as `hours_week_screen.dart`). The
+/// content ends up on the visit report the customer signs
+/// (`VisitReportScreen`), which goes to Ridder as `htmlFile` on "Werk
+/// afronden"; photos and documents are uploaded there as attachments.
 class WorkReportScreen extends StatefulWidget {
   final ServiceOrder order;
 
@@ -95,6 +96,14 @@ class _WorkReportScreenState extends State<WorkReportScreen> {
       List.generate(_stepTitles.length, (i) => i).where(_stepComplete).length;
 
   bool get _allRequiredComplete => _completedRequiredCount == _stepTitles.length;
+
+  /// Geen onderdeel is verplicht; opslaan kan zodra er iets is ingevuld.
+  bool get _anyComplete => _completedRequiredCount > 0;
+
+  List<String> get _emptyStepTitles => [
+    for (var i = 0; i < _stepTitles.length; i++)
+      if (!_stepComplete(i)) _stepTitles[i],
+  ];
 
   @override
   void initState() {
@@ -179,7 +188,33 @@ class _WorkReportScreenState extends State<WorkReportScreen> {
   }
 
   Future<void> _saveReport() async {
-    if (!_allRequiredComplete) return;
+    if (!_anyComplete) return;
+    if (!_allRequiredComplete) {
+      final leeg = _emptyStepTitles;
+      final doorgaan = await showCupertinoDialog<bool>(
+        context: context,
+        builder: (ctx) => CupertinoAlertDialog(
+          title: const Text('Niet alles ingevuld'),
+          content: Text(
+            'Deze onderdelen zijn nog leeg:\n\n'
+            '${leeg.map((t) => '• $t').join('\n')}\n\n'
+            'Ze komen niet op het bezoekrapport. Toch opslaan?',
+          ),
+          actions: [
+            CupertinoDialogAction(
+              onPressed: () => Navigator.of(ctx).pop(false),
+              child: const Text('Verder invullen'),
+            ),
+            CupertinoDialogAction(
+              isDefaultAction: true,
+              onPressed: () => Navigator.of(ctx).pop(true),
+              child: const Text('Toch opslaan'),
+            ),
+          ],
+        ),
+      );
+      if (doorgaan != true || !mounted) return;
+    }
     setState(() => _status = WorkReportStatus.saved);
     await _saveDraft();
     if (!mounted) return;
@@ -188,7 +223,8 @@ class _WorkReportScreenState extends State<WorkReportScreen> {
       builder: (ctx) => CupertinoAlertDialog(
         title: const Text('Rapport opgeslagen'),
         content: const Text(
-          'Dit rapport is lokaal opgeslagen — er is nog geen verzending naar Ridder gekoppeld.',
+          'Het rapport komt op het bezoekrapport dat de klant tekent, en gaat '
+          "samen met de foto's en documenten naar Ridder bij 'Werk afronden'.",
         ),
         actions: [
           CupertinoDialogAction(
@@ -556,18 +592,18 @@ class _WorkReportScreenState extends State<WorkReportScreen> {
     return CupertinoPageScaffold(
       backgroundColor: isDark ? CupertinoColors.black : const Color(0xFFF2F2F7),
       navigationBar: CupertinoNavigationBar(
-        backgroundColor: CupertinoColors.white,
+        backgroundColor: AppColors.navBar,
         border: null,
         padding: const EdgeInsetsDirectional.only(start: 4, end: 12),
         leading: CupertinoNavigationBarBackButton(
-          color: CupertinoColors.black,
+          color: AppColors.navForeground,
           onPressed: () => Navigator.of(context).pop(),
         ),
-        middle: const Text(
+        middle: Text(
           'Rapport',
           style: TextStyle(
             fontWeight: FontWeight.w600,
-            color: CupertinoColors.black,
+            color: AppColors.navForeground.resolveFrom(context),
           ),
         ),
         trailing: CupertinoButton(
@@ -579,6 +615,9 @@ class _WorkReportScreenState extends State<WorkReportScreen> {
       child: _loading
           ? const Center(child: CupertinoActivityIndicator())
           : SafeArea(
+              // Onderkant doet _SaveFooter zelf, anders blijft er een grijze
+              // strook onder de knop staan.
+              bottom: false,
               child: Column(
                 children: [
                   _OverviewHeader(
@@ -598,7 +637,12 @@ class _WorkReportScreenState extends State<WorkReportScreen> {
                   _SaveFooter(
                     borderColor: borderColor,
                     isDark: isDark,
-                    canSave: _allRequiredComplete,
+                    canSave: _anyComplete,
+                    hint: !_anyComplete
+                        ? 'Vul minstens één onderdeel in'
+                        : _allRequiredComplete
+                        ? null
+                        : 'Niet alle onderdelen zijn verplicht',
                     onSave: _saveReport,
                   ),
                 ],
@@ -619,18 +663,18 @@ class _WorkReportScreenState extends State<WorkReportScreen> {
     return CupertinoPageScaffold(
       backgroundColor: isDark ? CupertinoColors.black : const Color(0xFFF2F2F7),
       navigationBar: CupertinoNavigationBar(
-        backgroundColor: CupertinoColors.white,
+        backgroundColor: AppColors.navBar,
         border: null,
         padding: const EdgeInsetsDirectional.only(start: 4, end: 12),
         leading: CupertinoNavigationBarBackButton(
-          color: CupertinoColors.black,
+          color: AppColors.navForeground,
           onPressed: _closeStep,
         ),
         middle: Text(
           _stepTitles[index],
-          style: const TextStyle(
+          style: TextStyle(
             fontWeight: FontWeight.w600,
-            color: CupertinoColors.black,
+            color: AppColors.navForeground.resolveFrom(context),
           ),
         ),
         trailing: AnimatedOpacity(
@@ -700,7 +744,7 @@ class _OverviewHeader extends StatelessWidget {
                 ),
                 const SizedBox(height: 2),
                 Text(
-                  '$completed van $total onderdelen compleet',
+                  '$completed van $total onderdelen ingevuld',
                   style: TextStyle(
                     fontSize: 12,
                     color: CupertinoColors.secondaryLabel.resolveFrom(context),
@@ -746,7 +790,10 @@ class _RingProgress extends StatelessWidget {
       width: 44,
       height: 44,
       child: CustomPaint(
-        painter: _RingPainter(progress: progress),
+        painter: _RingPainter(
+          progress: progress,
+          trackColor: CupertinoColors.systemGrey5.resolveFrom(context),
+        ),
         child: Center(
           child: Text(
             '$completed/$total',
@@ -764,8 +811,9 @@ class _RingProgress extends StatelessWidget {
 
 class _RingPainter extends CustomPainter {
   final double progress;
+  final Color trackColor;
 
-  const _RingPainter({required this.progress});
+  const _RingPainter({required this.progress, required this.trackColor});
 
   static const _strokeWidth = 4.0;
 
@@ -775,7 +823,7 @@ class _RingPainter extends CustomPainter {
     final radius = (size.shortestSide - _strokeWidth) / 2;
 
     final trackPaint = Paint()
-      ..color = const Color(0xFFE5E5EA)
+      ..color = trackColor
       ..style = PaintingStyle.stroke
       ..strokeWidth = _strokeWidth;
     canvas.drawCircle(center, radius, trackPaint);
@@ -797,7 +845,7 @@ class _RingPainter extends CustomPainter {
 
   @override
   bool shouldRepaint(covariant _RingPainter oldDelegate) =>
-      oldDelegate.progress != progress;
+      oldDelegate.progress != progress || oldDelegate.trackColor != trackColor;
 }
 
 // ─── Save footer ────────────────────────────────────────────────────────────
@@ -809,12 +857,14 @@ class _SaveFooter extends StatelessWidget {
   final bool isDark;
   final bool canSave;
   final VoidCallback onSave;
+  final String? hint;
 
   const _SaveFooter({
     required this.borderColor,
     required this.isDark,
     required this.canSave,
     required this.onSave,
+    this.hint,
   });
 
   @override
@@ -824,10 +874,12 @@ class _SaveFooter extends StatelessWidget {
         : CupertinoColors.systemBackground;
     final bottomInset = MediaQuery.paddingOf(context).bottom;
 
-    final bg = canSave ? const Color(0xFF34C759) : const Color(0xFFD1D1D6);
+    final bg = canSave
+        ? const Color(0xFF34C759)
+        : AppColors.disabledFill.resolveFrom(context);
     final fg = canSave
         ? CupertinoColors.white
-        : const Color.fromRGBO(60, 60, 67, 0.45);
+        : AppColors.disabledText.resolveFrom(context);
 
     return Container(
       padding: EdgeInsets.fromLTRB(16, 12, 16, 12 + bottomInset),
@@ -835,7 +887,20 @@ class _SaveFooter extends StatelessWidget {
         color: cardBg,
         border: Border(top: BorderSide(color: borderColor)),
       ),
-      child: GestureDetector(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (hint != null) ...[
+            Text(
+              hint!,
+              style: TextStyle(
+                fontSize: 13,
+                color: CupertinoColors.secondaryLabel.resolveFrom(context),
+              ),
+            ),
+            const SizedBox(height: 8),
+          ],
+          GestureDetector(
         onTap: canSave ? onSave : null,
         child: AnimatedContainer(
           duration: const Duration(milliseconds: 200),
@@ -851,6 +916,8 @@ class _SaveFooter extends StatelessWidget {
             style: TextStyle(fontWeight: FontWeight.w600, color: fg),
           ),
         ),
+      ),
+        ],
       ),
     );
   }
@@ -1197,7 +1264,7 @@ class _AddFindingRow extends StatelessWidget {
                 color: tint.withValues(alpha: 0.16),
                 shape: BoxShape.circle,
               ),
-              child: const Icon(CupertinoIcons.add, size: 18, color: tint),
+              child: Icon(CupertinoIcons.add, size: 18, color: tint),
             ),
             const SizedBox(width: 12),
             const Text(
@@ -1426,8 +1493,8 @@ class _PhotoThumb extends StatelessWidget {
               child: Container(
                 width: 22,
                 height: 22,
-                decoration: const BoxDecoration(
-                  color: CupertinoColors.destructiveRed,
+                decoration: BoxDecoration(
+                  color: CupertinoColors.destructiveRed.resolveFrom(context),
                   shape: BoxShape.circle,
                 ),
                 child: const Icon(
@@ -1457,7 +1524,7 @@ class _AddPhotoTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    const tint = CupertinoColors.activeBlue;
+    final tint = CupertinoColors.activeBlue.resolveFrom(context);
     return GestureDetector(
       onTap: onTap,
       behavior: HitTestBehavior.opaque,
@@ -1469,7 +1536,7 @@ class _AddPhotoTile extends StatelessWidget {
           borderRadius: BorderRadius.circular(12),
           border: Border.all(color: tint.withValues(alpha: 0.3)),
         ),
-        child: const Icon(CupertinoIcons.add, color: tint, size: 24),
+        child: Icon(CupertinoIcons.add, color: tint, size: 24),
       ),
     );
   }
@@ -1541,13 +1608,15 @@ class _DocumentRow extends StatelessWidget {
             width: 34,
             height: 34,
             decoration: BoxDecoration(
-              color: const Color(0xFF2C3E6B).withValues(alpha: 0.14),
+              color: AppColors.navy
+                  .resolveFrom(context)
+                  .withValues(alpha: 0.14),
               borderRadius: BorderRadius.circular(9),
             ),
-            child: const Icon(
+            child: Icon(
               CupertinoIcons.doc_text,
               size: 16,
-              color: Color(0xFF2C3E6B),
+              color: AppColors.navy.resolveFrom(context),
             ),
           ),
           const SizedBox(width: 12),
@@ -1591,7 +1660,7 @@ class _AddDocumentRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    const tint = CupertinoColors.activeBlue;
+    final tint = CupertinoColors.activeBlue.resolveFrom(context);
     return GestureDetector(
       onTap: onTap,
       behavior: HitTestBehavior.opaque,
@@ -1611,10 +1680,10 @@ class _AddDocumentRow extends StatelessWidget {
                 color: tint.withValues(alpha: 0.16),
                 shape: BoxShape.circle,
               ),
-              child: const Icon(CupertinoIcons.add, size: 18, color: tint),
+              child: Icon(CupertinoIcons.add, size: 18, color: tint),
             ),
             const SizedBox(width: 12),
-            const Text(
+            Text(
               'Document toevoegen',
               style: TextStyle(
                 fontSize: 15,

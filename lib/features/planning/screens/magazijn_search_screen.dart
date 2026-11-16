@@ -4,6 +4,7 @@ import 'package:flutter/cupertino.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 
 import '../data/planning_repository.dart';
+import '../../../core/theme/app_colors.dart';
 
 /// Result returned when a user selects an article from the magazine.
 class MagazijnSelection {
@@ -194,17 +195,17 @@ class _MagazijnSearchScreenState extends State<MagazijnSearchScreen> {
 
     return CupertinoPageScaffold(
       navigationBar: CupertinoNavigationBar(
-        backgroundColor: CupertinoColors.white,
+        backgroundColor: AppColors.navBar,
         border: null,
         leading: CupertinoNavigationBarBackButton(
-          color: CupertinoColors.black,
+          color: AppColors.navForeground,
           onPressed: () => Navigator.of(context).pop(),
         ),
-        middle: const Text(
+        middle: Text(
           'Uit magazijn',
           style: TextStyle(
             fontWeight: FontWeight.w600,
-            color: CupertinoColors.black,
+            color: AppColors.navForeground.resolveFrom(context),
           ),
         ),
       ),

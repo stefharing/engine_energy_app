@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/cupertino.dart';
@@ -6,11 +7,14 @@ import 'package:mobile_scanner/mobile_scanner.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../../core/api/api_client.dart';
+import '../data/extras_draft_service.dart';
+import '../data/picking_sync_service.dart';
 import '../data/planning_repository.dart';
 import '../models/job_order.dart';
 import '../models/scanned_extra.dart';
 import '../widgets/quantity_dialog.dart';
 import 'magazijn_search_screen.dart';
+import '../../../core/theme/app_colors.dart';
 
 class PartsListScreen extends StatefulWidget {
   final ServiceOrder order;
@@ -25,6 +29,8 @@ class _PartsListScreenState extends State<PartsListScreen> {
   List<Map<String, dynamic>> _parts = [];
   Map<String, int> _scannedCounts = {};
   List<ScannedExtra> _extras = [];
+  StreamSubscription<List<ScannedExtra>>? _extrasSub;
+  StreamSubscription<Object?>? _pickingSub;
   Set<String> _flashIds = {};
   String? _toastMessage;
   bool _loading = true;
@@ -93,6 +99,8 @@ class _PartsListScreenState extends State<PartsListScreen> {
 
   @override
   void dispose() {
+    _extrasSub?.cancel();
+    _pickingSub?.cancel();
     _scrollCtrl.dispose();
     _scannerCtrl?.dispose();
     super.dispose();
@@ -115,6 +123,8 @@ class _PartsListScreenState extends State<PartsListScreen> {
       final all = (response.data['data'] as List).cast<Map<String, dynamic>>();
       final parts = all.where((e) => e['joborderdetailitem'] != null).toList();
 
+      // Eerst de gedeelde pickstatus (wat collega's al pickten) ophalen.
+      await PickingSyncService.instance.haalOp(_orderId);
       final prefs = await SharedPreferences.getInstance();
 
       final countsRaw = prefs.getString('scanned_counts_$_orderId') ?? '{}';
@@ -122,16 +132,12 @@ class _PartsListScreenState extends State<PartsListScreen> {
         (k, v) => MapEntry(k, (v as num).toInt()),
       );
 
-      final extrasRaw = prefs.getString('extra_scanned_$_orderId') ?? '[]';
-      final loadedExtras = (jsonDecode(extrasRaw) as List)
-          .cast<Map<String, dynamic>>()
-          .map(ScannedExtra.fromJson)
-          .toList();
+      final loadedExtras = await ExtrasDraftService.instance.load(_orderId);
 
       // A synced extra becomes a real joborderdetail line in Ridder, so on
       // the next load it comes back here as a normal (office-style) part.
       // Fold it into the picked-parts count instead of showing it twice.
-      var extrasChanged = false;
+      final gevouwen = <ScannedExtra>[];
       final extras = <ScannedExtra>[];
       for (final extra in loadedExtras) {
         Map<String, dynamic>? mergedPart;
@@ -145,7 +151,7 @@ class _PartsListScreenState extends State<PartsListScreen> {
         }
         if (mergedPart != null) {
           countsMap[_partId(mergedPart)] = extra.scannedCount;
-          extrasChanged = true;
+          gevouwen.add(extra);
         } else {
           extras.add(extra);
         }
@@ -159,10 +165,29 @@ class _PartsListScreenState extends State<PartsListScreen> {
           _loading = false;
         });
       }
-      if (extrasChanged) {
+      if (gevouwen.isNotEmpty) {
         await _saveCounts();
-        await _saveExtras();
+        for (final extra in gevouwen) {
+          await ExtrasDraftService.instance.verwijder(_orderId, extra);
+        }
       }
+      _extrasSub ??= ExtrasDraftService.instance.watch(_orderId).listen((
+        extras,
+      ) {
+        if (mounted) {
+          setState(
+            () => _extras = extras.where((e) => e.ridderId == null).toList(),
+          );
+        }
+      }, onError: (Object _) {});
+      // Live meekijken als een collega op dezelfde bon pickt.
+      _pickingSub ??= PickingSyncService.instance.watch(_orderId).listen((
+        status,
+      ) {
+        if (mounted) {
+          setState(() => _scannedCounts = Map.of(status.aantallen));
+        }
+      }, onError: (Object _) {});
     } catch (e) {
       if (mounted)
         setState(() {
@@ -326,14 +351,18 @@ class _PartsListScreenState extends State<PartsListScreen> {
       return;
     }
 
-    final idx = _extras.indexWhere((e) => e.code.toUpperCase() == normalized);
+    final idx = _extras.indexWhere(
+      (e) =>
+          e.code.toUpperCase() == normalized &&
+          e.needsPublication &&
+          ExtrasDraftService.instance.isVanMij(e),
+    );
     if (idx >= 0) {
-      setState(() {
-        _extras[idx] = _extras[idx].copyWith(
-          scannedCount: _extras[idx].scannedCount + quantity,
-        );
-      });
-      await _saveExtras();
+      final bijgewerkt = _extras[idx].copyWith(
+        scannedCount: _extras[idx].scannedCount + quantity,
+      );
+      setState(() => _extras[idx] = bijgewerkt);
+      await ExtrasDraftService.instance.bewaar(_orderId, bijgewerkt);
       _showToast('Aantal bijgewerkt');
       return;
     }
@@ -344,10 +373,14 @@ class _PartsListScreenState extends State<PartsListScreen> {
       return;
     }
 
-    setState(
-      () => _extras.add(ScannedExtra(item: item, scannedCount: quantity)),
+    final extra = await ExtrasDraftService.instance.voegToe(
+      _orderId,
+      item,
+      quantity,
     );
-    await _saveExtras();
+    if (mounted && !_extras.any((e) => e.regelId == extra.regelId)) {
+      setState(() => _extras.add(extra));
+    }
     _showToast('Artikel toegevoegd als extra');
   }
 
@@ -365,14 +398,7 @@ class _PartsListScreenState extends State<PartsListScreen> {
       'scanned_counts_$_orderId',
       jsonEncode(_scannedCounts),
     );
-  }
-
-  Future<void> _saveExtras() async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setString(
-      'extra_scanned_$_orderId',
-      jsonEncode(_extras.map((e) => e.toJson()).toList()),
-    );
+    unawaited(PickingSyncService.instance.stuurDoor(_orderId));
   }
 
   Future<void> _confirm() async {
@@ -383,6 +409,7 @@ class _PartsListScreenState extends State<PartsListScreen> {
         await prefs.setBool('part_taken_${_orderId}_${p['id']}', true);
       }
       await prefs.setBool('parts_confirmed_$_orderId', true);
+      unawaited(PickingSyncService.instance.stuurDoor(_orderId));
       if (mounted) Navigator.of(context).pop();
     } catch (e) {
       if (!mounted) return;
@@ -420,21 +447,21 @@ class _PartsListScreenState extends State<PartsListScreen> {
     return CupertinoPageScaffold(
       backgroundColor: isDark ? CupertinoColors.black : const Color(0xFFF2F2F7),
       navigationBar: CupertinoNavigationBar(
-        backgroundColor: CupertinoColors.white,
+        backgroundColor: AppColors.navBar,
         border: null,
         padding: const EdgeInsetsDirectional.only(start: 4),
         leading: CupertinoNavigationBarBackButton(
-          color: CupertinoColors.black,
+          color: AppColors.navForeground,
           onPressed: () => Navigator.of(context).pop(),
         ),
         middle: AnimatedOpacity(
           opacity: _showNavTitle ? 1.0 : 0.0,
           duration: const Duration(milliseconds: 150),
-          child: const Text(
+          child: Text(
             'Artikelen picken',
             style: TextStyle(
               fontWeight: FontWeight.w600,
-              color: CupertinoColors.black,
+              color: AppColors.navForeground.resolveFrom(context),
             ),
           ),
         ),
@@ -647,7 +674,7 @@ class _PartsListScreenState extends State<PartsListScreen> {
                               padding: const EdgeInsets.symmetric(vertical: 14),
                               color: _scannerActive
                                   ? const Color(0xFF636366)
-                                  : const Color(0xFFE5E5EA),
+                                  : CupertinoColors.systemGrey5,
                               borderRadius: BorderRadius.circular(14),
                               onPressed: _scannerActive
                                   ? _stopScanner
@@ -799,10 +826,10 @@ class _PartsListScreenState extends State<PartsListScreen> {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            const Icon(
+            Icon(
               CupertinoIcons.exclamationmark_circle,
               size: 44,
-              color: CupertinoColors.systemRed,
+              color: CupertinoColors.systemRed.resolveFrom(context),
             ),
             const SizedBox(height: 12),
             Text(_error!, textAlign: TextAlign.center),

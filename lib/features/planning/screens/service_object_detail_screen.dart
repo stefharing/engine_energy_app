@@ -1,5 +1,6 @@
 import 'package:flutter/cupertino.dart';
 import '../data/planning_repository.dart';
+import '../../../core/theme/app_colors.dart';
 
 class ServiceObjectDetailScreen extends StatefulWidget {
   final String serviceObjectId;
@@ -106,17 +107,17 @@ class _ServiceObjectDetailScreenState extends State<ServiceObjectDetailScreen> {
 
     return CupertinoPageScaffold(
       navigationBar: CupertinoNavigationBar(
-        backgroundColor: CupertinoColors.white,
+        backgroundColor: AppColors.navBar,
         border: null,
         leading: CupertinoNavigationBarBackButton(
-          color: CupertinoColors.black,
+          color: AppColors.navForeground,
           onPressed: () => Navigator.of(context).pop(),
         ),
         middle: Text(
           widget.name.isNotEmpty ? widget.name : 'Service object',
-          style: const TextStyle(
+          style: TextStyle(
             fontWeight: FontWeight.w600,
-            color: CupertinoColors.black,
+            color: AppColors.navForeground.resolveFrom(context),
           ),
         ),
       ),
@@ -136,10 +137,10 @@ class _ServiceObjectDetailScreenState extends State<ServiceObjectDetailScreen> {
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          const Icon(
+          Icon(
             CupertinoIcons.exclamationmark_circle,
             size: 40,
-            color: CupertinoColors.destructiveRed,
+            color: CupertinoColors.destructiveRed.resolveFrom(context),
           ),
           const SizedBox(height: 12),
           Text(_error!, textAlign: TextAlign.center),

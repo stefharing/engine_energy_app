@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/cupertino.dart';
@@ -5,11 +6,14 @@ import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../../core/api/api_client.dart';
+import '../data/extras_draft_service.dart';
+import '../data/picking_sync_service.dart';
 import '../data/planning_repository.dart';
 import '../models/job_order.dart';
 import '../models/scanned_extra.dart';
 import '../widgets/quantity_dialog.dart';
 import 'magazijn_search_screen.dart';
+import '../../../core/theme/app_colors.dart';
 
 /// Registers materials actually consumed on a bon — both articles the
 /// office already planned and set to be picked (via [PartsListScreen],
@@ -17,8 +21,8 @@ import 'magazijn_search_screen.dart';
 /// picked in the field that wasn't planned at all. Adding goes through
 /// [MagazijnSearchScreen] (see [ScannedExtra]), which already covers
 /// search, barcode scanning and asking for a quantity in one flow.
-/// Persists to the same `extra_scanned_<orderId>` draft [PartsListScreen]
-/// uses, so both screens agree on what's been added.
+/// Persists through `ExtrasDraftService`, same as [PartsListScreen], so
+/// both screens (and colleagues on the same bon) agree on what's been added.
 ///
 /// A picked article whose used quantity ends up different from the picked
 /// quantity is registered here as its own, separate line rather than
@@ -34,6 +38,7 @@ class UsedMaterialsScreen extends StatefulWidget {
 
 class _UsedMaterialsScreenState extends State<UsedMaterialsScreen> {
   List<ScannedExtra> _extras = [];
+  StreamSubscription<List<ScannedExtra>>? _extrasSub;
   Map<String, int> _pickedByCode = {};
   bool _loading = true;
   String? _error;
@@ -63,6 +68,7 @@ class _UsedMaterialsScreenState extends State<UsedMaterialsScreen> {
 
   @override
   void dispose() {
+    _extrasSub?.cancel();
     _scrollCtrl.dispose();
     super.dispose();
   }
@@ -90,22 +96,18 @@ class _UsedMaterialsScreenState extends State<UsedMaterialsScreen> {
       final all = (response.data['data'] as List).cast<Map<String, dynamic>>();
       final parts = all.where((e) => e['joborderdetailitem'] != null).toList();
 
+      await PickingSyncService.instance.haalOp(_orderId);
       final countsRaw = prefs.getString('scanned_counts_$_orderId') ?? '{}';
       final countsMap = (jsonDecode(countsRaw) as Map<String, dynamic>).map(
         (k, v) => MapEntry(k, (v as num).toInt()),
       );
 
-      final extrasRaw = prefs.getString('extra_scanned_$_orderId') ?? '[]';
-      final extras = (jsonDecode(extrasRaw) as List)
-          .cast<Map<String, dynamic>>()
-          .map(ScannedExtra.fromJson)
-          .toList();
+      final extras = await ExtrasDraftService.instance.load(_orderId);
 
       final seededRaw =
           prefs.getString('used_material_seeded_$_orderId') ?? '[]';
       final seeded = (jsonDecode(seededRaw) as List).cast<String>().toSet();
 
-      var extrasChanged = false;
       var seededChanged = false;
       final pickedByCode = <String, int>{};
 
@@ -131,9 +133,14 @@ class _UsedMaterialsScreenState extends State<UsedMaterialsScreen> {
         final fullItem = await PlanningRepository.instance.fetchItem(itemId);
         if (fullItem == null) continue;
 
-        extras.add(ScannedExtra(item: fullItem, scannedCount: pickedQty));
+        extras.add(
+          await ExtrasDraftService.instance.voegToe(
+            _orderId,
+            fullItem,
+            pickedQty,
+          ),
+        );
         seeded.add(partId);
-        extrasChanged = true;
         seededChanged = true;
       }
 
@@ -144,7 +151,7 @@ class _UsedMaterialsScreenState extends State<UsedMaterialsScreen> {
           _loading = false;
         });
       }
-      if (extrasChanged) await _saveExtras();
+      _luisterNaarExtras();
       if (seededChanged) {
         await prefs.setString(
           'used_material_seeded_$_orderId',
@@ -161,12 +168,44 @@ class _UsedMaterialsScreenState extends State<UsedMaterialsScreen> {
     }
   }
 
-  Future<void> _saveExtras() async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setString(
-      'extra_scanned_$_orderId',
-      jsonEncode(_extras.map((e) => e.toJson()).toList()),
+  /// Houdt de lijst live bij — ook artikelen die een collega op dezelfde
+  /// bon toevoegt, verschijnen zo direct.
+  void _luisterNaarExtras() {
+    _extrasSub ??= ExtrasDraftService.instance.watch(_orderId).listen(
+      (extras) {
+        if (mounted) setState(() => _extras = extras);
+      },
+      onError: (Object e) {
+        if (mounted) _showToast('Synchroniseren mislukt');
+      },
     );
+  }
+
+  /// Index van een eigen, nog niet gepubliceerd artikel met deze code, zodat
+  /// opnieuw scannen het aantal ophoogt in plaats van een dubbele regel.
+  int _eigenIndexVoorCode(String normalized) => _extras.indexWhere(
+    (e) =>
+        e.code.toUpperCase() == normalized &&
+        e.needsPublication &&
+        ExtrasDraftService.instance.isVanMij(e),
+  );
+
+  /// Werkt het aantal van [_extras]`[idx]` bij en slaat het op.
+  Future<void> _zetAantal(int idx, int aantal) async {
+    final bijgewerkt = _extras[idx].copyWith(scannedCount: aantal);
+    setState(() => _extras[idx] = bijgewerkt);
+    await ExtrasDraftService.instance.bewaar(_orderId, bijgewerkt);
+  }
+
+  Future<void> _voegNieuwToe(Map<String, dynamic> item, int aantal) async {
+    final extra = await ExtrasDraftService.instance.voegToe(
+      _orderId,
+      item,
+      aantal,
+    );
+    if (mounted && !_extras.any((e) => e.regelId == extra.regelId)) {
+      setState(() => _extras.add(extra));
+    }
   }
 
   /// Lets the mechanic choose how to add a material: pick a real catalog
@@ -233,14 +272,9 @@ class _UsedMaterialsScreenState extends State<UsedMaterialsScreen> {
   }) async {
     final normalized = code.trim().toUpperCase();
 
-    final idx = _extras.indexWhere((e) => e.code.toUpperCase() == normalized);
+    final idx = _eigenIndexVoorCode(normalized);
     if (idx >= 0) {
-      setState(() {
-        _extras[idx] = _extras[idx].copyWith(
-          scannedCount: _extras[idx].scannedCount + quantity,
-        );
-      });
-      await _saveExtras();
+      await _zetAantal(idx, _extras[idx].scannedCount + quantity);
       _showToast('Aantal bijgewerkt');
       return;
     }
@@ -251,10 +285,7 @@ class _UsedMaterialsScreenState extends State<UsedMaterialsScreen> {
       return;
     }
 
-    setState(
-      () => _extras.add(ScannedExtra(item: item, scannedCount: quantity)),
-    );
-    await _saveExtras();
+    await _voegNieuwToe(item, quantity);
     _showToast('Materiaal toegevoegd');
   }
 
@@ -269,31 +300,18 @@ class _UsedMaterialsScreenState extends State<UsedMaterialsScreen> {
     if (input == null) return;
 
     final normalized = input.name.trim().toUpperCase();
-    final idx = _extras.indexWhere((e) => e.code.toUpperCase() == normalized);
+    final idx = _eigenIndexVoorCode(normalized);
     if (idx >= 0) {
-      setState(() {
-        _extras[idx] = _extras[idx].copyWith(
-          scannedCount: _extras[idx].scannedCount + input.quantity,
-        );
-      });
-      await _saveExtras();
+      await _zetAantal(idx, _extras[idx].scannedCount + input.quantity);
       _showToast('Aantal bijgewerkt');
       return;
     }
 
-    setState(
-      () => _extras.add(
-        ScannedExtra(
-          item: {
-            'id': null,
-            'code': normalized,
-            'description': input.name.trim(),
-          },
-          scannedCount: input.quantity,
-        ),
-      ),
-    );
-    await _saveExtras();
+    await _voegNieuwToe({
+      'id': null,
+      'code': normalized,
+      'description': input.name.trim(),
+    }, input.quantity);
     _showToast('Materiaal toegevoegd');
   }
 
@@ -308,9 +326,7 @@ class _UsedMaterialsScreenState extends State<UsedMaterialsScreen> {
   /// Update: lets the mechanic correct the registered quantity for [extra].
   /// A quantity of 0 removes the line, same as [PartsListScreen._manualEntry].
   Future<void> _editQuantity(ScannedExtra extra) async {
-    final idx = _extras.indexWhere(
-      (e) => e.code.toUpperCase() == extra.code.toUpperCase(),
-    );
+    final idx = _extras.indexWhere((e) => e.regelId == extra.regelId);
     if (idx < 0) return;
 
     final qty = await promptQuantity(
@@ -322,24 +338,17 @@ class _UsedMaterialsScreenState extends State<UsedMaterialsScreen> {
     );
     if (qty == null) return;
 
-    setState(() {
-      if (qty == 0) {
-        _extras.removeAt(idx);
-      } else {
-        _extras[idx] = _extras[idx].copyWith(scannedCount: qty);
-      }
-    });
-    await _saveExtras();
+    if (qty == 0) {
+      await _deleteExtra(extra);
+    } else {
+      await _zetAantal(idx, qty);
+    }
   }
 
   /// Delete: explicit removal, independent from the quantity dialog.
   Future<void> _deleteExtra(ScannedExtra extra) async {
-    setState(() {
-      _extras.removeWhere(
-        (e) => e.code.toUpperCase() == extra.code.toUpperCase(),
-      );
-    });
-    await _saveExtras();
+    setState(() => _extras.removeWhere((e) => e.regelId == extra.regelId));
+    await ExtrasDraftService.instance.verwijder(_orderId, extra);
   }
 
   Future<void> _register() async {
@@ -364,21 +373,21 @@ class _UsedMaterialsScreenState extends State<UsedMaterialsScreen> {
     return CupertinoPageScaffold(
       backgroundColor: isDark ? CupertinoColors.black : const Color(0xFFF2F2F7),
       navigationBar: CupertinoNavigationBar(
-        backgroundColor: CupertinoColors.white,
+        backgroundColor: AppColors.navBar,
         border: null,
         padding: const EdgeInsetsDirectional.only(start: 4),
         leading: CupertinoNavigationBarBackButton(
-          color: CupertinoColors.black,
+          color: AppColors.navForeground,
           onPressed: () => Navigator.of(context).pop(),
         ),
         middle: AnimatedOpacity(
           opacity: _showNavTitle ? 1.0 : 0.0,
           duration: const Duration(milliseconds: 150),
-          child: const Text(
+          child: Text(
             'Gebruikt materiaal',
             style: TextStyle(
               fontWeight: FontWeight.w600,
-              color: CupertinoColors.black,
+              color: AppColors.navForeground.resolveFrom(context),
             ),
           ),
         ),
@@ -430,6 +439,10 @@ class _UsedMaterialsScreenState extends State<UsedMaterialsScreen> {
                                 extra: e,
                                 isDark: isDark,
                                 pickedQty: _pickedByCode[e.code.toUpperCase()],
+                                doorCollega: ExtrasDraftService.instance
+                                        .isVanMij(e)
+                                    ? null
+                                    : e.monteurNaam,
                                 onTap: () => _editQuantity(e),
                                 onDelete: () => _deleteExtra(e),
                               ),
@@ -521,10 +534,10 @@ class _UsedMaterialsScreenState extends State<UsedMaterialsScreen> {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            const Icon(
+            Icon(
               CupertinoIcons.exclamationmark_circle,
               size: 44,
-              color: CupertinoColors.systemRed,
+              color: CupertinoColors.systemRed.resolveFrom(context),
             ),
             const SizedBox(height: 12),
             Text(_error!, textAlign: TextAlign.center),
@@ -591,7 +604,9 @@ class _ManualArticleDialogState extends State<_ManualArticleDialog> {
             textCapitalization: TextCapitalization.sentences,
             placeholder: 'Naam',
             decoration: BoxDecoration(
-              color: CupertinoColors.tertiarySystemBackground,
+              color: CupertinoColors.tertiarySystemBackground.resolveFrom(
+                context,
+              ),
               borderRadius: BorderRadius.circular(8),
             ),
           ),
@@ -603,7 +618,9 @@ class _ManualArticleDialogState extends State<_ManualArticleDialog> {
             textAlign: TextAlign.center,
             placeholder: 'Aantal',
             decoration: BoxDecoration(
-              color: CupertinoColors.tertiarySystemBackground,
+              color: CupertinoColors.tertiarySystemBackground.resolveFrom(
+                context,
+              ),
               borderRadius: BorderRadius.circular(8),
             ),
             onSubmitted: (_) => _confirm(),
@@ -740,6 +757,9 @@ class _UsedMaterialCard extends StatelessWidget {
   final ScannedExtra extra;
   final bool isDark;
   final int? pickedQty;
+
+  /// Naam van de collega die dit artikel toevoegde; `null` als het van jou is.
+  final String? doorCollega;
   final VoidCallback onTap;
   final VoidCallback onDelete;
 
@@ -747,6 +767,7 @@ class _UsedMaterialCard extends StatelessWidget {
     required this.extra,
     required this.isDark,
     required this.pickedQty,
+    this.doorCollega,
     required this.onTap,
     required this.onDelete,
   });
@@ -780,10 +801,12 @@ class _UsedMaterialCard extends StatelessWidget {
                 color: const Color(0xFF34C759).withValues(alpha: 0.15),
                 shape: BoxShape.circle,
               ),
-              child: const Icon(
-                CupertinoIcons.checkmark,
+              child: Icon(
+                extra.isKilometers
+                    ? CupertinoIcons.car_fill
+                    : CupertinoIcons.checkmark,
                 size: 14,
-                color: Color(0xFF34C759),
+                color: const Color(0xFF34C759),
               ),
             ),
             const SizedBox(width: 12),
@@ -792,7 +815,9 @@ class _UsedMaterialCard extends StatelessWidget {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text(
-                    extra.isManual ? extra.description : extra.code,
+                    extra.isManual || extra.isKilometers
+                        ? extra.description
+                        : extra.code,
                     style: const TextStyle(
                       fontSize: 15,
                       fontWeight: FontWeight.w600,
@@ -808,7 +833,7 @@ class _UsedMaterialCard extends StatelessWidget {
                         ),
                       ),
                     )
-                  else
+                  else if (!extra.isKilometers)
                     Text(
                       extra.description,
                       style: TextStyle(
@@ -818,6 +843,17 @@ class _UsedMaterialCard extends StatelessWidget {
                         ),
                       ),
                     ),
+                  if (doorCollega != null) ...[
+                    const SizedBox(height: 2),
+                    Text(
+                      'Toegevoegd door $doorCollega',
+                      style: TextStyle(
+                        fontSize: 11,
+                        fontWeight: FontWeight.w500,
+                        color: CupertinoColors.systemBlue.resolveFrom(context),
+                      ),
+                    ),
+                  ],
                   if (pickedQty != null) ...[
                     const SizedBox(height: 2),
                     Text(
@@ -845,7 +881,7 @@ class _UsedMaterialCard extends StatelessWidget {
                   ),
                 ),
                 Text(
-                  'stuks',
+                  extra.unitLabel,
                   style: TextStyle(
                     fontSize: 11,
                     color: CupertinoColors.tertiaryLabel.resolveFrom(context),

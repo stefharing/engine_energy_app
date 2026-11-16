@@ -12,6 +12,7 @@ import '../../../widgets/nav_border.dart';
 
 import '../../../core/storage/settings_service.dart';
 import '../models/job_order.dart';
+import '../../../core/theme/app_colors.dart';
 
 class PlanningSettingsScreen extends StatefulWidget {
   final List<ServicePerson> employees;
@@ -86,15 +87,15 @@ class _PlanningSettingsScreenState extends State<PlanningSettingsScreen> {
 
     return CupertinoPageScaffold(
       navigationBar: CupertinoNavigationBar(
-        backgroundColor: CupertinoColors.white,
+        backgroundColor: AppColors.navBar,
         border: null,
         leading: CupertinoNavigationBarBackButton(
-          color: CupertinoColors.black,
+          color: AppColors.navForeground,
           onPressed: () => Navigator.of(context).pop(),
         ),
-        middle: const Text(
+        middle: Text(
           'Planning opties',
-          style: TextStyle(color: CupertinoColors.black),
+          style: TextStyle(color: AppColors.navForeground.resolveFrom(context)),
         ),
       ),
       child: SafeArea(
@@ -102,7 +103,7 @@ class _PlanningSettingsScreenState extends State<PlanningSettingsScreen> {
             ? const Center(child: CupertinoActivityIndicator())
             : Column(children: [
                 const NavBorder(),
-                const Padding(
+                Padding(
                   padding: EdgeInsets.fromLTRB(16, 20, 16, 8),
                   child: Align(
                     alignment: Alignment.centerLeft,
@@ -111,7 +112,7 @@ class _PlanningSettingsScreenState extends State<PlanningSettingsScreen> {
                       style: TextStyle(
                         fontSize: 12,
                         fontWeight: FontWeight.w600,
-                        color: CupertinoColors.secondaryLabel,
+                        color: CupertinoColors.secondaryLabel.resolveFrom(context),
                         letterSpacing: 0.5,
                       ),
                     ),
@@ -190,8 +191,8 @@ class _EmployeeRow extends StatelessWidget {
                         : CupertinoIcons.eye,
                     size: 22,
                     color: isHidden
-                        ? CupertinoColors.secondaryLabel
-                        : CupertinoColors.activeBlue,
+                        ? CupertinoColors.secondaryLabel.resolveFrom(context)
+                        : CupertinoColors.activeBlue.resolveFrom(context),
                   ),
                 ),
                 const SizedBox(width: 14),
@@ -202,7 +203,7 @@ class _EmployeeRow extends StatelessWidget {
                     style: TextStyle(
                       fontSize: 16,
                       color: isHidden
-                          ? CupertinoColors.secondaryLabel
+                          ? CupertinoColors.secondaryLabel.resolveFrom(context)
                           : CupertinoTheme.of(context)
                               .textTheme
                               .textStyle
@@ -215,12 +216,12 @@ class _EmployeeRow extends StatelessWidget {
                   onLongPressStart: (_) => HapticFeedback.mediumImpact(),
                   child: ReorderableDelayedDragStartListener(
                     index: index,
-                    child: const Padding(
+                    child: Padding(
                       padding: EdgeInsets.only(left: 12),
                       child: Icon(
                         CupertinoIcons.line_horizontal_3,
                         size: 20,
-                        color: CupertinoColors.tertiaryLabel,
+                        color: CupertinoColors.tertiaryLabel.resolveFrom(context),
                       ),
                     ),
                   ),

@@ -1,6 +1,7 @@
 import 'package:flutter/cupertino.dart';
 
 import '../data/planning_repository.dart';
+import '../../../core/theme/app_colors.dart';
 
 class RelationDetailScreen extends StatefulWidget {
   final String productionOrderId;
@@ -49,17 +50,17 @@ class _RelationDetailScreenState extends State<RelationDetailScreen> {
 
     return CupertinoPageScaffold(
       navigationBar: CupertinoNavigationBar(
-        backgroundColor: CupertinoColors.white,
+        backgroundColor: AppColors.navBar,
         border: null,
         leading: CupertinoNavigationBarBackButton(
-          color: CupertinoColors.black,
+          color: AppColors.navForeground,
           onPressed: () => Navigator.of(context).pop(),
         ),
         middle: Text(
           _loading ? 'Klant' : name,
-          style: const TextStyle(
+          style: TextStyle(
             fontWeight: FontWeight.w600,
-            color: CupertinoColors.black,
+            color: AppColors.navForeground.resolveFrom(context),
           ),
         ),
       ),
@@ -79,8 +80,8 @@ class _RelationDetailScreenState extends State<RelationDetailScreen> {
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              const Icon(CupertinoIcons.exclamationmark_circle,
-                  size: 40, color: CupertinoColors.destructiveRed),
+              Icon(CupertinoIcons.exclamationmark_circle,
+                  size: 40, color: CupertinoColors.destructiveRed.resolveFrom(context)),
               const SizedBox(height: 12),
               Text(_error!, textAlign: TextAlign.center),
               const SizedBox(height: 16),

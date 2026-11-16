@@ -1,6 +1,7 @@
 import 'package:flutter/cupertino.dart';
 import '../widgets/engine_logo.dart';
 import '../widgets/nav_border.dart';
+import '../core/theme/app_colors.dart';
 
 class UrenScreen extends StatelessWidget {
   const UrenScreen({super.key});
@@ -9,7 +10,7 @@ class UrenScreen extends StatelessWidget {
   Widget build(BuildContext context) {
     return const CupertinoPageScaffold(
       navigationBar: CupertinoNavigationBar(
-        backgroundColor: CupertinoColors.white,
+        backgroundColor: AppColors.navBar,
         border: null,
         padding: EdgeInsetsDirectional.symmetric(horizontal: 20),
         middle: EngineLogo(),

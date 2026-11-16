@@ -1,0 +1,217 @@
+<!doctype html>
+<html lang="nl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ridder factuur-debug</title>
+<style>
+  :root { --bg:#fff; --fg:#1c1c1e; --muted:#636366; --line:#d1d1d6; --accent:#ff9200; --soft:#f2f2f7; --err:#c0392b; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#1c1c1e; --fg:#f2f2f7; --muted:#a1a1a6; --line:#38383a; --soft:#2c2c2e; }
+  }
+  body { font:14px/1.5 -apple-system,system-ui,sans-serif; background:var(--bg); color:var(--fg); margin:0; padding:16px; }
+  h1 { font-size:18px; margin:0 0 4px; }
+  .switch { display:inline-flex; border:1px solid var(--line); border-radius:6px; overflow:hidden; vertical-align:middle; margin-left:8px; }
+  .switch button { border:0; border-radius:0; background:var(--soft); font-weight:600; font-size:12px; padding:3px 12px; }
+  .switch button:disabled { opacity:.4; cursor:not-allowed; }
+  .switch button.on-test { background:#34c759; color:#fff; }
+  .switch button.on-live { background:var(--err); color:#fff; }
+  body.live { border-top:4px solid var(--err); }
+  body.test { border-top:4px solid #34c759; }
+  .bar { display:flex; flex-wrap:wrap; gap:8px; align-items:end; margin:12px 0; }
+  label { display:flex; flex-direction:column; font-size:12px; color:var(--muted); }
+  input { font:inherit; padding:4px 6px; border:1px solid var(--line); border-radius:6px; background:var(--bg); color:var(--fg); }
+  button, a.btn { font:inherit; padding:4px 10px; border:1px solid var(--line); border-radius:6px; background:var(--soft); color:var(--fg); cursor:pointer; text-decoration:none; }
+  button.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
+  table { border-collapse:collapse; width:100%; }
+  th, td { text-align:left; padding:6px 8px; border-bottom:1px solid var(--line); vertical-align:top; }
+  th { font-size:12px; color:var(--muted); }
+  pre { background:var(--soft); padding:8px; border-radius:6px; overflow:auto; max-height:240px; margin:6px 0; font-size:12px; }
+  .err { color:var(--err); white-space:pre-wrap; }
+  .muted { color:var(--muted); }
+  .scroll { overflow-x:auto; }
+</style>
+</head>
+<body>
+<h1>Ridder factuur-debug
+  <span class="switch" id="switch">
+    <button id="env-test" data-env="test">TEST</button>
+    <button id="env-live" data-env="live">LIVE</button>
+  </span>
+</h1>
+<div class="muted" id="admin"></div>
+
+<div class="bar">
+  <label>Pagina <input id="page" type="number" min="1" value="1" style="width:70px"></label>
+  <label>Aantal <input id="size" type="number" min="1" max="200" value="25" style="width:70px"></label>
+  <label>Sorteren <input id="sort" value="id.desc" style="width:110px"></label>
+  <label>Filter (optioneel) <input id="filter" placeholder='bijv. id[eq]123' style="width:200px"></label>
+  <button class="primary" id="load">Facturen ophalen</button>
+  <button id="prev">←</button><button id="next">→</button>
+</div>
+
+<div id="msg" class="muted"></div>
+<div class="scroll"><table id="table"></table></div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const MAX_COLS = 6;
+let items = [];
+
+function setMsg(text, isError) {
+  $('msg').textContent = text || '';
+  $('msg').className = isError ? 'err' : 'muted';
+}
+
+async function api(path) {
+  const res = await fetch(path);
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw new Error(body.error || `Fout ${res.status}`);
+  }
+  return body;
+}
+
+function columns(rows) {
+  const keys = [];
+  for (const row of rows) {
+    for (const [k, v] of Object.entries(row)) {
+      if ((v === null || typeof v !== 'object') && !keys.includes(k)) keys.push(k);
+    }
+  }
+  keys.sort((a, b) => (a === 'id' ? -1 : b === 'id' ? 1 : 0));
+  return keys.slice(0, MAX_COLS);
+}
+
+function cell(text) {
+  const td = document.createElement('td');
+  td.textContent = text === null || text === undefined ? '' : String(text);
+  return td;
+}
+
+function render() {
+  const table = $('table');
+  table.replaceChildren();
+  if (!items.length) { setMsg('Geen facturen op deze pagina.'); return; }
+  const cols = columns(items);
+  const head = document.createElement('tr');
+  for (const c of cols) { const th = document.createElement('th'); th.textContent = c; head.append(th); }
+  head.append(document.createElement('th'));
+  table.append(head);
+  for (const item of items) {
+    const tr = document.createElement('tr');
+    for (const c of cols) tr.append(cell(item[c]));
+    const actions = document.createElement('td');
+    const docBtn = document.createElement('button');
+    docBtn.textContent = 'Documenten';
+    const rawBtn = document.createElement('button');
+    rawBtn.textContent = 'JSON';
+    actions.append(docBtn, ' ', rawBtn);
+    tr.append(actions);
+    table.append(tr);
+
+    const extra = document.createElement('tr');
+    const extraCell = document.createElement('td');
+    extraCell.colSpan = cols.length + 1;
+    extra.hidden = true;
+    extra.append(extraCell);
+    table.append(extra);
+
+    rawBtn.onclick = () => {
+      extra.hidden = !extra.hidden;
+      extraCell.replaceChildren();
+      if (!extra.hidden) {
+        const pre = document.createElement('pre');
+        pre.textContent = JSON.stringify(item, null, 2);
+        extraCell.append(pre);
+      }
+    };
+    docBtn.onclick = async () => {
+      extra.hidden = false;
+      extraCell.textContent = 'Laden…';
+      try {
+        const data = await api(`/api/invoices/${encodeURIComponent(item.id)}/documents`);
+        extraCell.replaceChildren();
+        if (!data.items.length) { extraCell.textContent = 'Geen documenten bij deze factuur.'; return; }
+        for (const doc of data.items) {
+          const row = document.createElement('div');
+          const label = document.createElement('span');
+          label.textContent = `Document ${doc.id}` + (doc.description || doc.name || doc.fileName ? ` – ${doc.description || doc.name || doc.fileName}` : '') + ' ';
+          const link = document.createElement('a');
+          link.className = 'btn';
+          link.textContent = 'Download pdf';
+          link.href = `/api/documents/${encodeURIComponent(doc.id)}/pdf`;
+          row.append(label, link);
+          const pre = document.createElement('pre');
+          pre.textContent = JSON.stringify(doc, null, 2);
+          extraCell.append(row, pre);
+        }
+      } catch (e) {
+        extraCell.replaceChildren();
+        const err = document.createElement('div');
+        err.className = 'err';
+        err.textContent = e.message;
+        extraCell.append(err);
+      }
+    };
+  }
+}
+
+async function load() {
+  setMsg('Laden…');
+  const q = new URLSearchParams({ page: $('page').value, size: $('size').value, sort: $('sort').value });
+  if ($('filter').value.trim()) q.set('filter', $('filter').value.trim());
+  try {
+    const data = await api(`/api/invoices?${q}`);
+    items = data.items;
+    setMsg(`${data.count} facturen (pagina ${data.page})`);
+    render();
+  } catch (e) {
+    items = [];
+    render();
+    setMsg(e.message, true);
+  }
+}
+
+$('load').onclick = load;
+$('prev').onclick = () => { $('page').value = Math.max(1, Number($('page').value) - 1); load(); };
+$('next').onclick = () => { $('page').value = Number($('page').value) + 1; load(); };
+
+function showConfig(c) {
+  document.body.className = c.environment;
+  $('admin').textContent = `${c.tenant} · ${c.administration}`;
+  for (const env of ['test', 'live']) {
+    const b = $('env-' + env);
+    b.className = c.environment === env ? 'on-' + env : '';
+    b.disabled = !c.available.includes(env);
+    b.title = b.disabled ? `${env} is niet ingesteld in .env` : '';
+  }
+}
+
+async function switchTo(env) {
+  if (env === 'live' && !confirm('Overschakelen naar de LIVE administratie? De pagina blijft alleen-lezen.')) return;
+  try {
+    const res = await fetch('/api/environment', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ environment: env }),
+    });
+    const body = await res.json();
+    if (!res.ok) throw new Error(body.error || `Fout ${res.status}`);
+    showConfig(body);
+    $('page').value = 1;
+    items = [];
+    render();
+    setMsg(`Omgeving gewisseld naar ${env.toUpperCase()}. Haal de facturen opnieuw op.`);
+  } catch (e) {
+    setMsg(e.message, true);
+  }
+}
+
+$('env-test').onclick = () => switchTo('test');
+$('env-live').onclick = () => switchTo('live');
+
+api('/api/config').then(showConfig).catch((e) => setMsg(e.message, true));
+</script>
+</body>
+</html>

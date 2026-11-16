@@ -27,8 +27,18 @@ void setNarrowPhoneSurface(WidgetTester tester) {
   addTearDown(tester.view.reset);
 }
 
+/// Het scherm start bij het openen een netwerkaanroep met `.timeout(...)`
+/// (o.a. het ophalen van de uursoorten, 10 s). In een test komt het antwoord
+/// niet binnen de nep-klok terug, dus staat die timer nog open als de test
+/// eindigt en faalt de check "A Timer is still pending". Scherm weghalen en
+/// de nep-klok voorbij de langste timeout laten lopen ruimt dat op.
+Future<void> laatTimeoutsAflopen(WidgetTester tester) async {
+  await tester.pumpWidget(const SizedBox());
+  await tester.pump(const Duration(seconds: 15));
+}
+
 void main() {
-  testWidgets('renders with no bon selected, no layout exceptions', (
+  testWidgets('renders with no bon selected (indirect hours), no layout exceptions', (
     tester,
   ) async {
     SharedPreferences.setMockInitialValues({});
@@ -39,8 +49,11 @@ void main() {
     await tester.pump();
 
     expect(tester.takeException(), isNull);
-    expect(find.text('Selecteer een bon'), findsOneWidget);
-    expect(find.text('Geen bon geselecteerd'), findsOneWidget);
+    // Zonder bon opent het scherm in "Indirecte uren" (uren zonder bon).
+    expect(find.text('Indirecte uren'), findsWidgets);
+    expect(find.text('Nog geen uren of Kilometers toegevoegd'), findsWidgets);
+
+    await laatTimeoutsAflopen(tester);
   });
 
   testWidgets('renders with an initial bon selected, no layout exceptions', (
@@ -57,6 +70,8 @@ void main() {
 
     expect(tester.takeException(), isNull);
     expect(find.text(_order.description), findsOneWidget);
+
+    await laatTimeoutsAflopen(tester);
   });
 
   testWidgets('swiping through the 29-day range does not overflow', (

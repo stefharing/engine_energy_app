@@ -7,6 +7,9 @@ import '../api/api_client.dart';
 import 'credentials.dart';
 import 'credentials_store.dart';
 import 'employee.dart';
+import 'employee_repository.dart';
+import '../firebase/firebase_bootstrap.dart';
+import 'microsoft_auth_config.dart';
 
 enum LoginFailureReason { invalidCredentials, network }
 
@@ -50,13 +53,62 @@ class AuthService {
   /// `servicemechanic.id`.
   int? get currentMechanicId => _employee?.id;
 
+  /// Medewerkers die in het bonnenscherm de bonnen van iedereen mogen zien
+  /// (op naam, want de ids verschillen per administratie).
+  static const _alleBonnenNamen = {'wim boekestijn', 'jos weterings'};
+
+  bool get seesAllBonnen =>
+      _alleBonnenNamen.contains(_employee?.name.trim().toLowerCase());
+
   /// Loads any previously-saved credentials/employee from the Keychain into
   /// memory. Call once at app startup, before rendering the login/home
   /// decision.
   Future<void> bootstrap() async {
     _credentials = await CredentialsStore.instance.read();
     _employee = await CredentialsStore.instance.readEmployee();
+    // Een bewaarde sessie telt alleen als er ook een Microsoft-sessie is.
+    // Sessies uit eerdere versies (monteur gekozen, geen Microsoft) moeten
+    // dus één keer opnieuw inloggen.
+    if (_employee != null && !_hasMicrosoftSession) {
+      _credentials = null;
+      _employee = null;
+      await CredentialsStore.instance.clear();
+    }
     isLoggedInListenable.value = isLoggedIn;
+  }
+
+  /// In debug-builds blijft de oude medewerkerskeuze werken (zonder
+  /// Microsoft-sessie, dus zonder gedeelde tussenopslag).
+  bool get _hasMicrosoftSession =>
+      kDebugMode ||
+      !MicrosoftAuthConfig.enabled || !FirebaseBootstrap.isReady || FirebaseBootstrap.isSignedIn;
+
+  /// Logt in met het Microsoft-werkaccount en zoekt de bijbehorende monteur
+  /// in Ridder op e-mailadres. Gooit [MicrosoftLoginException] (leesbare
+  /// melding) of [LoginException] (Ridder niet bereikbaar).
+  Future<void> loginWithMicrosoft() async {
+    final result = await FirebaseBootstrap.signInWithMicrosoft();
+    try {
+      final Employee? employee;
+      try {
+        employee = await EmployeeRepository.instance.findByEmails(result.emails);
+      } on DioException {
+        throw LoginException(LoginFailureReason.network);
+      }
+      if (employee == null) {
+        final adres = result.emails.isEmpty ? '' : ' (${result.emails.first})';
+        throw MicrosoftLoginException(
+          'Je Microsoft-account$adres is niet gekoppeld aan een monteur in '
+          'Ridder. Neem contact op met kantoor.',
+        );
+      }
+      await login(employee);
+    } catch (_) {
+      // Geen halve sessie achterlaten: Firebase-toegang hoort bij een
+      // gekoppelde monteur.
+      await FirebaseBootstrap.signOut();
+      rethrow;
+    }
   }
 
   /// Calls `GET /ServiceRemote/login` (see the class doc for why its
@@ -139,5 +191,6 @@ class AuthService {
     _employee = null;
     isLoggedInListenable.value = false;
     await CredentialsStore.instance.clear();
+    await FirebaseBootstrap.signOut();
   }
 }

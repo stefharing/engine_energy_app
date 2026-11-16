@@ -111,6 +111,17 @@ class WorkReportDraft {
     status: status ?? this.status,
   );
 
+  /// Namen van de onderdelen die nog leeg zijn, in de volgorde van het
+  /// rapport. Geen enkel onderdeel is verplicht; dit is alleen voor de
+  /// waarschuwing bij opslaan en publiceren.
+  List<String> get legeOnderdelen => [
+    if (workDescription.trim().isEmpty) 'Werkomschrijving',
+    if (startingSituation.trim().isEmpty) 'Beginsituatie',
+    if (!findings.any((f) => f.text.trim().isNotEmpty)) 'Bevindingen',
+    if (recommendations.trim().isEmpty) 'Aanbevelingen',
+    if (photoPaths.isEmpty && documents.isEmpty) "Foto's & documenten",
+  ];
+
   Map<String, dynamic> toJson() => {
     'workDescription': workDescription,
     'startingSituation': startingSituation,

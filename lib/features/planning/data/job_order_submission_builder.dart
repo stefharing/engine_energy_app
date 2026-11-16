@@ -1,8 +1,11 @@
+import 'dart:convert';
+
 import 'package:uuid/uuid.dart';
 
 import '../models/hours_entry.dart';
 import '../models/scanned_extra.dart';
 import '../models/service_remote_format.dart';
+import '../models/signature_capture.dart';
 
 const _uuid = Uuid();
 
@@ -23,13 +26,27 @@ const _uuid = Uuid();
 ///    `changedServiceObject`/`order.delete` fields must be non-null or the
 ///    server 500s with "Nullable object must have a value." — see the
 ///    per-field comments below for the confirmed rule for each.
-///  - `htmlFile` MUST be entirely absent from the body, even if the source
-///    job order response happened to include one. Including it — even as a
-///    placeholder — causes a server-side PDF rendering failure.
+///  - `htmlFile` is never copied over from the source job order response:
+///    a placeholder (or stale) value there caused a server-side PDF
+///    rendering failure. It is only set from [htmlFile] — the signed visit
+///    report ("bezoekrapport") built by the app, a complete HTML document,
+///    which Ridder turns into the "Getekende werkbon" pdf. The caller
+///    retries without it if Ridder rejects it (see
+///    `ServiceRemoteJobOrderRepository.submitHoursForJobOrder`).
 ///
 /// [hours] replaces whatever `hours` array (if any) was on the original job
 /// order response — the caller's list is the authoritative source for this
 /// submission's worked hours.
+///
+/// [signaturePaths] (the `[[x, y], ...]`-per-stroke vector data captured by
+/// `SignaturePadScreen`, via `SignatureCapture.paths`; `int32[][][]` per the
+/// Swagger schema) becomes the `signature.paths` field when non-empty —
+/// unconfirmed against a live submission (unlike the rest of this
+/// builder), since there was no way to
+/// curl-test a real signed submission while building this. [signerName] is
+/// the best available stand-in for who signed (the bon's linked contact
+/// name); Ridder's schema has no separate "customer signed" flag to fill in
+/// beyond `signature.name`.
 ///
 /// Never mutates [rawJobOrder]: every map this function writes into is
 /// copied first.
@@ -40,10 +57,36 @@ Map<String, dynamic> buildServiceRemoteJobOrderSubmission({
   required List<HoursEntry> hours,
   required String uniqueId,
   List<ScannedExtra> extras = const [],
+  List<List<List<int>>>? signaturePaths,
+  String? signerName,
+  String? signerEmail,
+  String? employeeName,
+  String? htmlFile,
+  bool? overnachting,
+  bool onHold = false,
 }) {
   final body = Map<String, dynamic>.from(rawJobOrder)
     ..remove('htmlFile')
     ..remove('htmlfile');
+  if (htmlFile != null && htmlFile.trim().isNotEmpty) {
+    // Als base64 (UTF-8), niet als ruwe HTML: met ruwe HTML — zelfs een
+    // simpele placeholder — gaf Ridder steeds 500 "Fout tijdens aanmaken
+    // .pdf bestand van html". Bestanden gaan in deze API als base64-tekst.
+    body['htmlFile'] = base64Encode(utf8.encode(htmlFile));
+  }
+
+  final dateChanged = formatServiceRemoteUtc(DateTime.now());
+
+  // Eigen veld "Overnachting" (Ridder gebruikersveld, kolomnaam OVERNACHTING)
+  // staat in `userFields` van de bon. Bestaande waarden blijven staan; alleen
+  // als de monteur het vinkje heeft gezet/verwijderd passen we het aan.
+  if (overnachting != null) {
+    final bestaand = body['userFields'];
+    body['userFields'] = {
+      if (bestaand is Map) ...Map<String, dynamic>.from(bestaand),
+      'OVERNACHTING': overnachting,
+    };
+  }
 
   body['uniqueId'] = uniqueId;
   body['appointment'] = appointmentId;
@@ -53,9 +96,19 @@ Map<String, dynamic> buildServiceRemoteJobOrderSubmission({
       ? (rawJobOrder['hours'] as List<dynamic>? ?? const [])
       : hours.map((entry) => entry.toJson()).toList();
 
+  // Ridder slaat `hours[].memo` via Service Remote (nog) niet op, ook al
+  // staat het veld in het schema. Tijdelijke oplossing: de memo's ook als
+  // regels onder "Gerealiseerde oplossing" (`realizedSolution`) zetten.
+  final memoRegels = hoursMemoLines(hours, employeeName: employeeName);
+  if (memoRegels.isNotEmpty) {
+    body['realizedSolution'] = appendToRealizedSolution(
+      rawJobOrder['realizedSolution'] as String?,
+      memoRegels,
+    );
+  }
+
   if (extras.isNotEmpty) {
     final jobOrderId = rawJobOrder['id'] as int;
-    final dateChanged = formatServiceRemoteUtc(DateTime.now());
     final detailItems = List<dynamic>.from(
       rawJobOrder['detailItems'] as List<dynamic>? ?? const [],
     );
@@ -97,6 +150,33 @@ Map<String, dynamic> buildServiceRemoteJobOrderSubmission({
     final wip = List<dynamic>.from(
       rawJobOrder['wip'] as List<dynamic>? ?? const [],
     );
+    // Voorbereidingsregels van kantoor ("bonregel artikel" in Ridder): de
+    // `detailItems` die al op de bon staan. Gebruikt de monteur zo'n artikel,
+    // dan koppelen we de registratie (`wip.jobOrderDetailItemId`) aan die
+    // regel en maken we geen tweede regel aan. Een artikel dat niet op de
+    // voorbereiding stond blijft ongekoppeld (id 0). Elke regel wordt
+    // maximaal één keer gekoppeld, en niet als een eerdere registratie er al
+    // naar verwijst.
+    final alGekoppeld = <int>{
+      for (final w in wip.whereType<Map>())
+        if (w['jobOrderDetailItemId'] is int && w['jobOrderDetailItemId'] != 0)
+          w['jobOrderDetailItemId'] as int,
+    };
+    final voorbereiding = <Map>[
+      for (final line in detailItems.whereType<Map>())
+        if (line['id'] is int &&
+            line['id'] != 0 &&
+            line['itemId'] is int &&
+            line['delete'] != true &&
+            !alGekoppeld.contains(line['id']))
+          line,
+    ];
+    int? koppelAanVoorbereiding(int itemId) {
+      final i = voorbereiding.indexWhere((l) => l['itemId'] == itemId);
+      if (i < 0) return null;
+      return voorbereiding.removeAt(i)['id'] as int;
+    }
+
     for (final extra in extras) {
       if (extra.isManual) {
         detailMisc.add({
@@ -144,20 +224,23 @@ Map<String, dynamic> buildServiceRemoteJobOrderSubmission({
           'totalPriceIncVAT': 0,
         });
       } else {
-        detailItems.add({
-          'id': 0,
-          'dateChanged': dateChanged,
-          'delete': false,
-          'recordTag': null,
-          'description': extra.description,
-          'quantity': extra.scannedCount.toDouble(),
-          'itemId': extra.itemId,
-          'warehouseId': warehouseId,
-          'jobOrderId': jobOrderId,
-          'deliveryMethod': 1,
-          'registrationPath': 5,
-          'isTravelDetail': false,
-        });
+        final voorbereidingId = koppelAanVoorbereiding(extra.itemId);
+        if (voorbereidingId == null) {
+          detailItems.add({
+            'id': 0,
+            'dateChanged': dateChanged,
+            'delete': false,
+            'recordTag': null,
+            'description': extra.description,
+            'quantity': extra.scannedCount.toDouble(),
+            'itemId': extra.itemId,
+            'warehouseId': warehouseId,
+            'jobOrderId': jobOrderId,
+            'deliveryMethod': 1,
+            'registrationPath': 5,
+            'isTravelDetail': false,
+          });
+        }
         wip.add({
           'id': 0,
           'dateChanged': dateChanged,
@@ -169,7 +252,7 @@ Map<String, dynamic> buildServiceRemoteJobOrderSubmission({
           'warehouseId': warehouseId,
           'jobOrderId': jobOrderId,
           'description': extra.description,
-          'jobOrderDetailItemId': 0,
+          'jobOrderDetailItemId': voorbereidingId ?? 0,
           'jobOrderDetailMiscId': 0,
           'followup': false,
           'unitId': extra.unitId,
@@ -202,12 +285,44 @@ Map<String, dynamic> buildServiceRemoteJobOrderSubmission({
   }
 
   body['followup'] = body['followup'] ?? false;
-  body['onHold'] = body['onHold'] ?? false;
-  // Confirmed value — always false for this (no signature-capture flow yet).
+  // Onderbroken (handleiding Ridder: "Einde werkdag" / remote status
+  // Onderbroken): een tussentijdse registratie bij een meerdaagse bon. Kantoor
+  // verwerkt hem als "Onderbreking verwerkt" — de uren worden projecturen,
+  // maar de afspraak blijft open. Altijd expliciet zetten: de bon kan van een
+  // eerdere tussentijdse registratie nog `onHold: true` hebben.
+  body['onHold'] = onHold;
+  // Confirmed value in every live submission so far (all of which predate
+  // the signature-capture flow) — kept forced false even now that a real
+  // signature can be attached, since there's no live-confirmed evidence
+  // this needs to flip to true once signed. Revisit with a live curl check
+  // if Ridder doesn't actually register the signature as expected.
   body['readyForSignature'] = false;
 
   body['contact'] = body['contact'] ?? _emptyContact();
-  body['signature'] = body['signature'] ?? _emptySignature();
+  // A real captured signature (vector `paths`, the only thing Ridder's
+  // schema has room for — there is no image field) takes priority over
+  // whatever the source job order had; otherwise fall back to the
+  // confirmed empty stub, same as every other nullable nested object here.
+  // Either way the result is cut down to exactly the `ServiceRemoteSignature`
+  // fields (`additionalProperties: false`) with int paths — see
+  // [_sanitizeSignature].
+  final capturedPaths = SignatureCapture.pathsFromJson(signaturePaths);
+  final rawSignature = body['signature'] as Map<String, dynamic>?;
+  body['signature'] = capturedPaths.isNotEmpty
+      ? {
+          'id': 0,
+          'dateChanged': dateChanged,
+          'delete': false,
+          'recordTag': null,
+          'name': signerName,
+          'email': (signerEmail?.trim().isEmpty ?? true)
+              ? null
+              : signerEmail!.trim(),
+          'paths': capturedPaths,
+        }
+      : rawSignature == null
+      ? _emptySignature()
+      : _sanitizeSignature(rawSignature);
   body['alternativeServiceAddress'] =
       body['alternativeServiceAddress'] ?? _emptyAlternativeServiceAddress();
 
@@ -257,6 +372,22 @@ Map<String, dynamic> _emptyContact() => {
   'phone': null,
 };
 
+/// Reduces a signature from the source job order to the seven fields
+/// `ServiceRemoteSignature` allows, with `paths` normalized to `int32[][][]`
+/// — `null` when there are no non-empty strokes, never `[[]]`.
+Map<String, dynamic> _sanitizeSignature(Map<String, dynamic> raw) {
+  final paths = SignatureCapture.pathsFromJson(raw['paths']);
+  return {
+    'id': raw['id'] ?? 0,
+    'dateChanged': raw['dateChanged'] ?? serviceRemoteSentinelDateTime,
+    'delete': raw['delete'] ?? false,
+    'recordTag': raw['recordTag'],
+    'name': raw['name'],
+    'email': raw['email'],
+    'paths': paths.isEmpty ? null : paths,
+  };
+}
+
 Map<String, dynamic> _emptySignature() => {
   'id': 0,
   'dateChanged': serviceRemoteSentinelDateTime,
@@ -305,3 +436,68 @@ Map<String, dynamic> _fallbackChangedServiceObject() => {
   'lastKnownMeterReading': 0.0,
   'contactID': 0,
 };
+
+
+const _memoDagen = ['', 'Ma', 'Di', 'Wo', 'Do', 'Vr', 'Za', 'Zo'];
+
+/// Eén leesbare regel per urenregel met een memo, bijv.
+/// `Ma 28-09 · Lex de Bruijn · 8u00 · Motor uit elkaar gehaald`.
+/// Urenregels zonder (of met een lege) memo worden overgeslagen.
+List<String> hoursMemoLines(List<HoursEntry> hours, {String? employeeName}) {
+  final naam = employeeName?.trim();
+  return [
+    for (final h in hours)
+      if ((h.memo ?? '').trim().isNotEmpty)
+        [
+          '${_memoDagen[h.start.weekday]} '
+              '${h.start.day.toString().padLeft(2, '0')}-'
+              '${h.start.month.toString().padLeft(2, '0')}',
+          if (naam != null && naam.isNotEmpty) naam,
+          '${h.totalTime ~/ 60}u${(h.totalTime % 60).toString().padLeft(2, '0')}',
+          h.memo!.trim().replaceAll(RegExp(r'\s*\n\s*'), ' '),
+        ].join(' · '),
+  ];
+}
+
+/// Voegt [regels] toe onder de bestaande "Gerealiseerde oplossing", zonder
+/// wat kantoor (of een eerdere publicatie) er al had neergezet te
+/// overschrijven. Regels die er al letterlijk in staan worden niet nog eens
+/// toegevoegd, zodat opnieuw publiceren geen dubbele regels geeft.
+///
+/// Is de bestaande tekst RTF (Ridder bewaart memo's soms zo), dan worden de
+/// regels als RTF-alinea's vóór de afsluitende `}` ingevoegd.
+String appendToRealizedSolution(String? bestaand, List<String> regels) {
+  final huidig = bestaand ?? '';
+  final nieuw = regels
+      .where((r) => !huidig.contains(r) && !huidig.contains(_rtfEscape(r)))
+      .toList();
+  if (nieuw.isEmpty) return huidig;
+
+  final isRtf = huidig.trimLeft().startsWith(r'{\rtf');
+  if (isRtf) {
+    final slot = huidig.lastIndexOf('}');
+    if (slot > 0) {
+      final rtfRegels = nieuw.map((r) => r'\par ' + _rtfEscape(r)).join('\n');
+      return '${huidig.substring(0, slot)}$rtfRegels\n${huidig.substring(slot)}';
+    }
+  }
+  final basis = huidig.trimRight();
+  return [if (basis.isNotEmpty) basis, ...nieuw].join('\n');
+}
+
+String _rtfEscape(String s) {
+  final b = StringBuffer();
+  // UTF-16-eenheden: tekens buiten de BMP (emoji) worden zo als twee
+  // \u-codes (surrogaatpaar) geschreven, zoals RTF dat verwacht.
+  for (final c in s.codeUnits) {
+    if (c == 0x5C || c == 0x7B || c == 0x7D) {
+      b.write('\\${String.fromCharCode(c)}');
+    } else if (c > 127) {
+      // RTF-unicode: \uN? (N als signed 16-bit).
+      b.write('\\u${c > 32767 ? c - 65536 : c}?');
+    } else {
+      b.writeCharCode(c);
+    }
+  }
+  return b.toString();
+}

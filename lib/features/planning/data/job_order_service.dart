@@ -12,7 +12,8 @@ import '../models/job_order_lines.dart';
 /// assignment/appointment link — `jobOrder`, `employee`, `date`,
 /// `appointmentActionId`, no duration) AND a separate `hours` array (actual
 /// worked time + server-computed pricing). Flow 2 ("uren invullen") writes
-/// to `hours`; `employees` is left untouched by this service.
+/// to `hours`; `employees` is left untouched by this service (extra
+/// mechanics go through [JobOrderService.addEmployee], via v2 appointments).
 class JobOrderKeys {
   static const hours = 'hours';
   static const detailItems = 'detailItems';
@@ -72,6 +73,100 @@ class JobOrderService {
     }
 
     return _getJobOrder(jobOrderId);
+  }
+
+  // ─── Extra monteur op de bon ────────────────────────────────────────────
+
+  /// Velden van een bestaande afspraak die we niet overnemen: door de server
+  /// gezet, of horend bij de koppeling met Outlook/Exchange.
+  static const _nietOvernemen = {
+    'id',
+    'creator',
+    'datechanged',
+    'datecreated',
+    'datedone',
+    'recordlink',
+    'userchanged',
+    'datachanges',
+    'datasequence',
+    'exchangeitemid',
+    'exchangeseriesid',
+    'originalhashcode',
+    'synchronizetime',
+    'synchronizetime_exchange',
+    'templateappointment',
+    'workflowstate',
+    'externalkey',
+  };
+
+  /// Zet [employeeId] op de bon door een afspraak aan te maken in
+  /// `/crm/appointments` (v2), op dezelfde afspraakactie [appointmentActionId]
+  /// als de afspraak van de hoofdmonteur. Ridder toont de monteurs van een bon
+  /// juist aan de hand van die afspraken (`employees[]` van de v1-bon is er
+  /// een weergave van; een nieuwe regel daar wordt met een 500 geweigerd).
+  ///
+  /// De nieuwe afspraak is een kopie van een bestaande afspraak op de actie
+  /// (zelfde tijdstip en standaardwaarden), met de nieuwe monteur erin en
+  /// zonder hoofddeelnemer. Geeft het id van de nieuwe afspraak terug.
+  Future<int> addEmployee({
+    required int appointmentActionId,
+    required int employeeId,
+  }) async {
+    final dio = ApiClient.instance.dio;
+    final response = await dio.get(
+      '/crm/appointments',
+      queryParameters: {
+        'page': 1,
+        'size': 50,
+        'filter': 'appointmentaction.id[eq]$appointmentActionId',
+      },
+    );
+    final bestaand = ((response.data['data'] as List<dynamic>?) ?? const [])
+        .whereType<Map>()
+        .map((e) => Map<String, dynamic>.from(e))
+        .toList();
+
+    if (bestaand.any((a) => _idOf(a['employee']) == employeeId)) {
+      throw const MonteurAlOpBon();
+    }
+    if (bestaand.isEmpty) throw const GeenAfspraakOpBon();
+
+    // Neem bij voorkeur de afspraak van de hoofdmonteur als voorbeeld.
+    final voorbeeld = bestaand.firstWhere(
+      (a) => a['mainparticipant'] == true,
+      orElse: () => bestaand.first,
+    );
+
+    final body = <String, dynamic>{};
+    voorbeeld.forEach((key, value) {
+      if (_nietOvernemen.contains(key) || value == null) return;
+      // Verwijzingen (monteur, afspraakactie, ...) volstaan met hun id.
+      body[key] = value is Map && value['id'] != null
+          ? {'id': value['id']}
+          : value;
+    });
+    body['employee'] = {'id': employeeId};
+    body['appointmentaction'] = {'id': appointmentActionId};
+    body['mainparticipant'] = false;
+
+    final created = await dio.post('/crm/appointments', data: body);
+    final data = created.data;
+    final newId = data is Map ? _idOf(data['id']) : null;
+    final newEmployee = data is Map ? _idOf(data['employee']) : null;
+    if (newId == null || newEmployee != employeeId) {
+      throw DioException(
+        requestOptions: created.requestOptions,
+        response: created,
+        error: 'Ridder gaf geen afspraak terug voor monteur $employeeId '
+            '(antwoord: $data)',
+      );
+    }
+    return newId;
+  }
+
+  static int? _idOf(dynamic value) {
+    final raw = value is Map ? value['id'] : value;
+    return raw is int ? raw : int.tryParse('${raw ?? ''}');
   }
 
   // ─── Flow 1: pick-scherm "bevestigen en afsluiten" ──────────────────────
@@ -212,4 +307,15 @@ bool isSameDayAndEmployee(
   return lineDate.year == date.year &&
       lineDate.month == date.month &&
       lineDate.day == date.day;
+}
+
+
+/// De monteur staat al op de bon.
+class MonteurAlOpBon implements Exception {
+  const MonteurAlOpBon();
+}
+
+/// De bon heeft (nog) geen afspraak om een extra monteur aan te koppelen.
+class GeenAfspraakOpBon implements Exception {
+  const GeenAfspraakOpBon();
 }

@@ -1,3 +1,6 @@
+import 'dart:io' show File;
+
+import 'package:archive/archive.dart';
 import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart';
 import 'package:uuid/uuid.dart';
@@ -160,11 +163,19 @@ class ServiceRemoteJobOrderRepository {
   /// Each step throws its own [JobOrderSubmissionException] subtype so the
   /// caller can show which step failed, mirroring the original
   /// `service_remote` flow's distinct-failure-reason UI.
-  Future<void> submitHoursForJobOrder({
+  Future<JobOrderSubmissionResult> submitHoursForJobOrder({
     required int jobOrderId,
     required int employeeId,
     required List<HoursEntry> hours,
     List<ScannedExtra> extras = const [],
+    List<List<List<int>>>? signaturePaths,
+    String? signerName,
+    String? signerEmail,
+    String? employeeName,
+    String? htmlFile,
+    bool? overnachting,
+    List<String> attachmentPaths = const [],
+    bool onderbreken = false,
   }) async {
     final credentials = AuthService.instance.currentCredentials;
     if (credentials == null) {
@@ -211,6 +222,7 @@ class ServiceRemoteJobOrderRepository {
       throw JobOrderSubmissionAppointmentCloseFailed(e.toString());
     }
 
+    final uniqueId = _uuid.v4();
     final Map<String, dynamic> body;
     try {
       body = buildServiceRemoteJobOrderSubmission(
@@ -218,19 +230,61 @@ class ServiceRemoteJobOrderRepository {
         appointmentId: appointmentId,
         employeeId: employeeId,
         hours: hours,
-        uniqueId: _uuid.v4(),
+        uniqueId: uniqueId,
         extras: extras,
+        signaturePaths: signaturePaths,
+        signerName: signerName,
+        signerEmail: signerEmail,
+        employeeName: employeeName,
+        htmlFile: htmlFile,
+        overnachting: overnachting,
+        onHold: onderbreken,
       );
     } catch (e) {
       throw JobOrderSubmissionPostFailed('Body opbouwen mislukt: $e');
     }
 
+    var rapportMeegestuurd = body.containsKey('htmlFile');
+    try {
+      await _postJobOrder(jobOrderId, body);
+    } on JobOrderSubmissionPostFailed catch (e) {
+      if (!rapportMeegestuurd) rethrow;
+      // Ridder kon het meegestuurde bezoekrapport eerder niet verwerken
+      // (pdf-fout). Dan liever de registratie zonder rapport dan helemaal
+      // niet: nog één keer, zelfde uniqueId, zonder htmlFile.
+      debugPrint(
+        '[diag] POST met bezoekrapport mislukt ($e) — opnieuw zonder htmlFile',
+      );
+      rapportMeegestuurd = false;
+      await _postJobOrder(jobOrderId, Map.of(body)..remove('htmlFile'));
+    }
+
+    final bijlagen = await _uploadBijlagen(
+      jobOrderId,
+      uniqueId,
+      attachmentPaths,
+    );
+    return JobOrderSubmissionResult(
+      uniqueId: uniqueId,
+      rapportMeegestuurd: rapportMeegestuurd,
+      bijlagenAangeboden: attachmentPaths.length,
+      bijlagenGeupload: bijlagen,
+    );
+  }
+
+  Future<void> _postJobOrder(int jobOrderId, Map<String, dynamic> body) async {
     bool posted;
     try {
       // Temporary diagnostic: compare the exact outgoing `hours[].memo`
       // values with what Ridder persists after this submission.
+      // Het bezoekrapport (met handtekening als base64) is te groot om te
+      // loggen; alleen de lengte.
+      final html = body['htmlFile'];
+      final logBody = html is String
+          ? (Map.of(body)..['htmlFile'] = '<bezoekrapport: ${html.length} tekens>')
+          : body;
       debugPrint(
-        '[diag] POST /ServiceRemote/JobOrder/$jobOrderId request body: $body',
+        '[diag] POST /ServiceRemote/JobOrder/$jobOrderId request body: $logBody',
         wrapWidth: 1024,
       );
       debugPrint(
@@ -269,6 +323,71 @@ class ServiceRemoteJobOrderRepository {
       );
     }
   }
+
+  /// Zet foto's en documenten uit "Rapport schrijven" als bijlagen bij de
+  /// servicebonregistratie in Ridder: één zip naar
+  /// `POST /ServiceRemote/JobOrder/{id}/registration/{uniqueId}/documents`.
+  /// Mag het afronden nooit laten mislukken; geeft het aantal geüploade
+  /// bestanden terug (0 bij een fout, of op web waar geen lokale bestanden
+  /// zijn).
+  Future<int> _uploadBijlagen(
+    int jobOrderId,
+    String registrationId,
+    List<String> paden,
+  ) async {
+    if (paden.isEmpty || kIsWeb) return 0;
+    try {
+      final archief = Archive();
+      final gebruikt = <String>{};
+      for (final pad in paden) {
+        final bestand = File(pad);
+        if (!await bestand.exists()) continue;
+        final bytes = await bestand.readAsBytes();
+        var naam = pad.split('/').last;
+        var i = 1;
+        while (!gebruikt.add(naam)) {
+          naam = '${i++}_$naam';
+        }
+        archief.addFile(ArchiveFile(naam, bytes.length, bytes));
+      }
+      if (archief.isEmpty) return 0;
+      final List<int>? zip = ZipEncoder().encode(archief);
+      if (zip == null) return 0;
+      final response = await _dio.post(
+        '/ServiceRemote/JobOrder/$jobOrderId/registration/$registrationId/documents',
+        data: FormData.fromMap({
+          'zip': MultipartFile.fromBytes(zip, filename: 'bijlagen.zip'),
+        }),
+      );
+      debugPrint(
+        '[diag] bijlagen-upload -> ${response.statusCode} '
+        'body=${_shortBody(response.data)}',
+      );
+      return response.statusCode == 200 ? archief.length : 0;
+    } catch (e) {
+      debugPrint('[diag] bijlagen-upload mislukt: $e');
+      return 0;
+    }
+  }
+}
+
+/// Resultaat van [ServiceRemoteJobOrderRepository.submitHoursForJobOrder]:
+/// de registratie zelf is altijd gelukt (anders volgt een exception); dit
+/// zegt of het bezoekrapport en de bijlagen ook zijn meegekomen.
+class JobOrderSubmissionResult {
+  const JobOrderSubmissionResult({
+    required this.uniqueId,
+    required this.rapportMeegestuurd,
+    required this.bijlagenAangeboden,
+    required this.bijlagenGeupload,
+  });
+
+  final String uniqueId;
+  final bool rapportMeegestuurd;
+  final int bijlagenAangeboden;
+  final int bijlagenGeupload;
+
+  bool get bijlagenMislukt => bijlagenAangeboden > 0 && bijlagenGeupload == 0;
 }
 
 /// Failure fetching the job order detail
@@ -319,4 +438,14 @@ class JobOrderSubmissionAppointmentCloseFailed
 
 class JobOrderSubmissionPostFailed extends JobOrderSubmissionException {
   const JobOrderSubmissionPostFailed(super.message);
+}
+
+/// Een collega is deze bon op dit moment al aan het afronden.
+class JobOrderSubmissionBezetDoorCollega extends JobOrderSubmissionException {
+  const JobOrderSubmissionBezetDoorCollega(super.message);
+}
+
+/// De gedeelde tussenopslag (Firestore) was niet bereikbaar.
+class JobOrderSubmissionSyncFailed extends JobOrderSubmissionException {
+  const JobOrderSubmissionSyncFailed(super.message);
 }

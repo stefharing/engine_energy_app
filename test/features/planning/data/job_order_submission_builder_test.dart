@@ -1,7 +1,10 @@
+import 'dart:convert';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:engine_energy_app/features/planning/data/job_order_submission_builder.dart';
 import 'package:engine_energy_app/features/planning/models/hours_entry.dart';
 import 'package:engine_energy_app/features/planning/models/scanned_extra.dart';
+import 'package:engine_energy_app/features/planning/models/signature_capture.dart';
 
 void main() {
   HoursEntry entry({DateTime? start, DateTime? end}) => HoursEntry(
@@ -82,6 +85,74 @@ void main() {
         'isTravelDetail': false,
       },
     ]);
+  });
+
+  test(
+    'links a used article to the office preparation line (bonregel artikel) '
+    'instead of adding a second detailItems line',
+    () {
+      final body = buildServiceRemoteJobOrderSubmission(
+        rawJobOrder: baseJobOrder(
+          extra: {
+            'warehouseId': 2,
+            'detailItems': [
+              {'id': 186, 'itemId': 66105, 'quantity': 2},
+            ],
+          },
+        ),
+        appointmentId: 112,
+        employeeId: 6,
+        hours: [entry()],
+        uniqueId: 'x',
+        extras: [
+          ScannedExtra(
+            item: {'id': 66105, 'code': 'X1', 'description': 'Hose'},
+            scannedCount: 2,
+          ),
+          // Niet op de voorbereiding: ongekoppeld, en wel een nieuwe regel.
+          ScannedExtra(
+            item: {'id': 8447, 'code': 'OIL-1', 'description': 'Oil filter'},
+            scannedCount: 1,
+          ),
+        ],
+      );
+
+      final wip = (body['wip'] as List).cast<Map>();
+      expect(wip.firstWhere((w) => w['itemId'] == 66105)['jobOrderDetailItemId'], 186);
+      expect(wip.firstWhere((w) => w['itemId'] == 8447)['jobOrderDetailItemId'], 0);
+      final regels = (body['detailItems'] as List).cast<Map>();
+      expect(regels.where((l) => l['itemId'] == 66105), hasLength(1));
+      expect(regels.where((l) => l['itemId'] == 8447), hasLength(1));
+    },
+  );
+
+  test('a preparation line is linked at most once', () {
+    final body = buildServiceRemoteJobOrderSubmission(
+      rawJobOrder: baseJobOrder(
+        extra: {
+          'warehouseId': 2,
+          'detailItems': [
+            {'id': 186, 'itemId': 66105, 'quantity': 2},
+          ],
+          'wip': [
+            {'id': 1, 'itemId': 66105, 'jobOrderDetailItemId': 186},
+          ],
+        },
+      ),
+      appointmentId: 112,
+      employeeId: 6,
+      hours: [entry()],
+      uniqueId: 'x',
+      extras: [
+        ScannedExtra(
+          item: {'id': 66105, 'code': 'X1', 'description': 'Hose'},
+          scannedCount: 1,
+        ),
+      ],
+    );
+
+    final wip = (body['wip'] as List).cast<Map>();
+    expect(wip.last['jobOrderDetailItemId'], 0);
   });
 
   test('appends manually entered extras as generic detailMisc lines', () {
@@ -184,7 +255,7 @@ void main() {
     },
   );
 
-  test('followup/onHold default to false only when missing', () {
+  test('followup defaults to false only when missing', () {
     final body = buildServiceRemoteJobOrderSubmission(
       rawJobOrder: baseJobOrder(),
       appointmentId: 112,
@@ -193,17 +264,50 @@ void main() {
       uniqueId: 'x',
     );
     expect(body['followup'], false);
-    expect(body['onHold'], false);
 
     final passthrough = buildServiceRemoteJobOrderSubmission(
-      rawJobOrder: baseJobOrder(extra: {'followup': true, 'onHold': true}),
+      rawJobOrder: baseJobOrder(extra: {'followup': true}),
       appointmentId: 112,
       employeeId: 6,
       hours: [entry()],
       uniqueId: 'x',
     );
     expect(passthrough['followup'], true);
-    expect(passthrough['onHold'], true);
+  });
+
+  test('onHold komt alleen uit de parameter, nooit uit de bron', () {
+    // Standaard false.
+    final standaard = buildServiceRemoteJobOrderSubmission(
+      rawJobOrder: baseJobOrder(),
+      appointmentId: 112,
+      employeeId: 6,
+      hours: [entry()],
+      uniqueId: 'x',
+    );
+    expect(standaard['onHold'], false);
+
+    // Een bon die van een eerdere onderbreking nog onHold:true heeft, mag
+    // dat niet doorgeven: Ridder boekt dan geen projecturen (zie onderzoek
+    // tussentijdse uren, okt 2026).
+    final staleBron = buildServiceRemoteJobOrderSubmission(
+      rawJobOrder: baseJobOrder(extra: {'onHold': true}),
+      appointmentId: 112,
+      employeeId: 6,
+      hours: [entry()],
+      uniqueId: 'x',
+    );
+    expect(staleBron['onHold'], false);
+
+    // Expliciet onderbreken blijft mogelijk.
+    final onderbroken = buildServiceRemoteJobOrderSubmission(
+      rawJobOrder: baseJobOrder(),
+      appointmentId: 112,
+      employeeId: 6,
+      hours: [entry()],
+      uniqueId: 'x',
+      onHold: true,
+    );
+    expect(onderbroken['onHold'], true);
   });
 
   test(
@@ -420,6 +524,167 @@ void main() {
     expect((body['hours'] as List).single, entry().toJson());
   });
 
+  test(
+    'uses signaturePaths/signerName for the signature field when provided',
+    () {
+      final body = buildServiceRemoteJobOrderSubmission(
+        rawJobOrder: baseJobOrder(
+          extra: {
+            'signature': {'id': 9, 'name': 'stale'},
+          },
+        ),
+        appointmentId: 112,
+        employeeId: 6,
+        hours: [entry()],
+        uniqueId: 'x',
+        signaturePaths: [
+          [
+            [0, 0],
+            [1, 2],
+          ],
+        ],
+        signerName: 'J. Jansen',
+      );
+
+      expect(body['signature'], {
+        'id': 0,
+        'dateChanged': isA<String>(),
+        'delete': false,
+        'recordTag': null,
+        'name': 'J. Jansen',
+        'email': null,
+        'paths': [
+          [
+            [0, 0],
+            [1, 2],
+          ],
+        ],
+      });
+    },
+  );
+
+  test('signature paths are int32 and survive a JSON round-trip as ints', () {
+    final body = buildServiceRemoteJobOrderSubmission(
+      rawJobOrder: baseJobOrder(),
+      appointmentId: 112,
+      employeeId: 6,
+      hours: [entry()],
+      uniqueId: 'x',
+      signaturePaths: SignatureCapture.pathsFromJson([
+        [
+          [279.6666666666667, 10.4],
+          [280.5, 11.49],
+        ],
+      ]),
+    );
+
+    final encoded = jsonEncode(body['signature']);
+    expect(encoded, contains('"paths":[[[280,10],[281,11]]]'));
+  });
+
+  test(
+    'empty strokes are dropped; only-empty strokes fall back to the stub',
+    () {
+      final withEmpty = buildServiceRemoteJobOrderSubmission(
+        rawJobOrder: baseJobOrder(),
+        appointmentId: 112,
+        employeeId: 6,
+        hours: [entry()],
+        uniqueId: 'x',
+        signaturePaths: [
+          [],
+          [
+            [1, 2],
+          ],
+          [],
+        ],
+      );
+      expect((withEmpty['signature'] as Map)['paths'], [
+        [
+          [1, 2],
+        ],
+      ]);
+
+      final onlyEmpty = buildServiceRemoteJobOrderSubmission(
+        rawJobOrder: baseJobOrder(),
+        appointmentId: 112,
+        employeeId: 6,
+        hours: [entry()],
+        uniqueId: 'x',
+        signaturePaths: [[], []],
+      );
+      expect((onlyEmpty['signature'] as Map)['paths'], isNull);
+    },
+  );
+
+  test(
+    "a source job order's signature is cut down to the seven schema fields",
+    () {
+      final body = buildServiceRemoteJobOrderSubmission(
+        rawJobOrder: baseJobOrder(
+          extra: {
+            'signature': {
+              'id': 9,
+              'dateChanged': '2026-01-01T00:00:00Z',
+              'delete': false,
+              'recordTag': 'x',
+              'name': 'Klant',
+              'email': 'klant@example.com',
+              'paths': [
+                [
+                  [1.6, 2.2],
+                ],
+                [],
+              ],
+              'signedAt': '2026-01-01T00:00:00Z',
+              'image': 'base64...',
+            },
+          },
+        ),
+        appointmentId: 112,
+        employeeId: 6,
+        hours: [entry()],
+        uniqueId: 'x',
+      );
+
+      expect(body['signature'], {
+        'id': 9,
+        'dateChanged': '2026-01-01T00:00:00Z',
+        'delete': false,
+        'recordTag': 'x',
+        'name': 'Klant',
+        'email': 'klant@example.com',
+        'paths': [
+          [
+            [2, 2],
+          ],
+        ],
+      });
+    },
+  );
+
+  test('an empty signaturePaths list falls back to the confirmed stub', () {
+    final body = buildServiceRemoteJobOrderSubmission(
+      rawJobOrder: baseJobOrder(),
+      appointmentId: 112,
+      employeeId: 6,
+      hours: [entry()],
+      uniqueId: 'x',
+      signaturePaths: const [],
+      signerName: 'J. Jansen',
+    );
+
+    expect(body['signature'], {
+      'id': 0,
+      'dateChanged': '1900-01-01T00:00:00Z',
+      'delete': false,
+      'recordTag': null,
+      'name': null,
+      'email': null,
+      'paths': null,
+    });
+  });
+
   test('does not mutate the source job order map', () {
     final raw = baseJobOrder(
       extra: {
@@ -441,5 +706,102 @@ void main() {
     expect(raw.containsKey('hours'), isFalse);
     expect((raw['order'] as Map).containsKey('delete'), isFalse);
     expect((raw['serviceObject'] as Map).containsKey('buildDate'), isFalse);
+  });
+
+  group('memo\'s naar "Gerealiseerde oplossing"', () {
+    HoursEntry metMemo(String? memo, {int minuten = 480}) => HoursEntry(
+      jobOrderId: 79,
+      employeeId: 6,
+      start: DateTime(2026, 9, 28, 8),
+      end: DateTime(2026, 9, 28, 8).add(Duration(minutes: minuten)),
+      totalTime: minuten,
+      timeEmployee: minuten,
+      workActivityId: 20,
+      uniqueId: 'g',
+      memo: memo,
+    );
+
+    test('één regel per urenregel met memo, met monteursnaam', () {
+      final regels = hoursMemoLines([
+        metMemo('Motor uit elkaar gehaald'),
+        metMemo(null),
+        metMemo('   '),
+        metMemo('Pakking\nvervangen', minuten: 138),
+      ], employeeName: 'Lex de Bruijn');
+      expect(regels, [
+        'Ma 28-09 · Lex de Bruijn · 8u00 · Motor uit elkaar gehaald',
+        'Ma 28-09 · Lex de Bruijn · 2u18 · Pakking vervangen',
+      ]);
+    });
+
+    test('bestaande tekst blijft staan, geen dubbele regels', () {
+      const regel = 'Ma 28-09 · Lex · 8u00 · Motor';
+      final eerste = appendToRealizedSolution('Filter vervangen.', [regel]);
+      expect(eerste, 'Filter vervangen.\n$regel');
+      expect(appendToRealizedSolution(eerste, [regel]), eerste);
+      expect(appendToRealizedSolution(null, [regel]), regel);
+    });
+
+    test('RTF: regels als alinea vóór de afsluitende accolade', () {
+      const rtf = r'{\rtf1\ansi Bestaand}';
+      final uit = appendToRealizedSolution(rtf, ['Ma 28-09 · Motor']);
+      expect(uit.startsWith(r'{\rtf1\ansi Bestaand\par Ma 28-09 \u183? Motor'), isTrue);
+      expect(uit.endsWith('}'), isTrue);
+      expect(appendToRealizedSolution(uit, ['Ma 28-09 · Motor']), uit);
+    });
+
+    test('builder zet realizedSolution alleen bij memo\'s', () {
+      final zonder = buildServiceRemoteJobOrderSubmission(
+        rawJobOrder: baseJobOrder(extra: {'realizedSolution': 'Oud'}),
+        appointmentId: 112,
+        employeeId: 6,
+        hours: [metMemo(null)],
+        uniqueId: 'u',
+        employeeName: 'Lex',
+      );
+      expect(zonder['realizedSolution'], 'Oud');
+
+      final met = buildServiceRemoteJobOrderSubmission(
+        rawJobOrder: baseJobOrder(extra: {'realizedSolution': 'Oud'}),
+        appointmentId: 112,
+        employeeId: 6,
+        hours: [metMemo('Motor')],
+        uniqueId: 'u',
+        employeeName: 'Lex',
+      );
+      expect(met['realizedSolution'], 'Oud\nMa 28-09 · Lex · 8u00 · Motor');
+    });
+  });
+
+  test('htmlFile alleen uit de parameter, nooit uit de bron', () {
+    final zonder = buildServiceRemoteJobOrderSubmission(
+      rawJobOrder: baseJobOrder(extra: {'htmlFile': 'oud'}),
+      appointmentId: 112,
+      employeeId: 6,
+      hours: [entry()],
+      uniqueId: 'u',
+    );
+    expect(zonder.containsKey('htmlFile'), isFalse);
+
+    final met = buildServiceRemoteJobOrderSubmission(
+      rawJobOrder: baseJobOrder(extra: {'htmlFile': 'oud'}),
+      appointmentId: 112,
+      employeeId: 6,
+      hours: [entry()],
+      uniqueId: 'u',
+      htmlFile: '<html>rapport</html>',
+      signaturePaths: [
+        [
+          [1, 2],
+          [3, 4],
+        ],
+      ],
+      signerName: 'P. Jansen',
+      signerEmail: ' p@jansen.nl ',
+    );
+    // Base64 van de UTF-8-HTML.
+    expect(met['htmlFile'], 'PGh0bWw+cmFwcG9ydDwvaHRtbD4=');
+    expect(met['signature']['name'], 'P. Jansen');
+    expect(met['signature']['email'], 'p@jansen.nl');
   });
 }

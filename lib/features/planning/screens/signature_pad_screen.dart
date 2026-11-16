@@ -4,6 +4,9 @@ import 'package:flutter/cupertino.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 
+import '../../../core/theme/app_colors.dart';
+import '../models/signature_capture.dart';
+
 /// One continuous pen stroke — a lift-and-redraw starts a new [_Stroke]
 /// rather than appending to this one, so gaps between strokes never get
 /// connected by a stray line.
@@ -21,11 +24,19 @@ class _Stroke {
 /// bon), it's shown as the starting canvas content so re-opening this
 /// screen doesn't look like the signature was lost — "Wissen" drops it
 /// and starts a blank pad, or "Gebruiken" re-confirms it as-is together
-/// with any new strokes drawn on top.
+/// with any new strokes drawn on top. [initialPaths] carries that same
+/// prior signature's vector strokes (the rendered [initialSignature] PNG
+/// has none of its own) so re-confirming without drawing anything new
+/// still returns paths Ridder can be submitted with.
 class SignaturePadScreen extends StatefulWidget {
   final Uint8List? initialSignature;
+  final List<List<List<int>>>? initialPaths;
 
-  const SignaturePadScreen({super.key, this.initialSignature});
+  const SignaturePadScreen({
+    super.key,
+    this.initialSignature,
+    this.initialPaths,
+  });
 
   @override
   State<SignaturePadScreen> createState() => _SignaturePadScreenState();
@@ -36,6 +47,7 @@ class _SignaturePadScreenState extends State<SignaturePadScreen> {
   final _boundaryKey = GlobalKey();
   bool _capturing = false;
   late bool _hasInitial = widget.initialSignature != null;
+  late List<List<List<int>>> _initialPaths = widget.initialPaths ?? const [];
 
   bool get _isEmpty => _strokes.isEmpty && !_hasInitial;
 
@@ -65,6 +77,7 @@ class _SignaturePadScreenState extends State<SignaturePadScreen> {
   void _clear() => setState(() {
     _strokes.clear();
     _hasInitial = false;
+    _initialPaths = const [];
   });
 
   Future<void> _confirm() async {
@@ -78,7 +91,20 @@ class _SignaturePadScreenState extends State<SignaturePadScreen> {
       final image = await boundary.toImage(pixelRatio: 2.0);
       final byteData = await image.toByteData(format: ui.ImageByteFormat.png);
       if (byteData == null || !mounted) return;
-      Navigator.of(context).pop(byteData.buffer.asUint8List());
+      // Ridder's `paths` is int32[][][] — round to whole canvas pixels.
+      final newPaths = [
+        for (final stroke in _strokes)
+          if (stroke.points.isNotEmpty)
+            [
+              for (final p in stroke.points) [p.dx.round(), p.dy.round()],
+            ],
+      ];
+      Navigator.of(context).pop(
+        SignatureCapture(
+          png: byteData.buffer.asUint8List(),
+          paths: [..._initialPaths, ...newPaths],
+        ),
+      );
     } finally {
       if (mounted) setState(() => _capturing = false);
     }
@@ -87,7 +113,7 @@ class _SignaturePadScreenState extends State<SignaturePadScreen> {
   @override
   Widget build(BuildContext context) {
     return CupertinoPageScaffold(
-      backgroundColor: CupertinoColors.white,
+      backgroundColor: AppColors.card,
       child: SafeArea(
         child: Column(
           children: [
@@ -140,7 +166,7 @@ class _SignaturePadScreenState extends State<SignaturePadScreen> {
                 child: Container(
                   decoration: BoxDecoration(
                     border: Border.all(
-                      color: const Color(0xFFD1D1D6),
+                      color: AppColors.separator.resolveFrom(context),
                       width: 1,
                     ),
                     borderRadius: BorderRadius.circular(12),
@@ -150,6 +176,8 @@ class _SignaturePadScreenState extends State<SignaturePadScreen> {
                     child: Stack(
                       fit: StackFit.expand,
                       children: [
+                        // Stays white in dark mode too: it's the "paper"
+                        // for the black ink, and what the PNG captures.
                         RepaintBoundary(
                           key: _boundaryKey,
                           child: ColoredBox(
@@ -180,10 +208,11 @@ class _SignaturePadScreenState extends State<SignaturePadScreen> {
                             child: Center(
                               child: Text(
                                 'Teken hier de handtekening',
+                                // The pad is white in both modes, so
+                                // always use the light-mode grey.
                                 style: TextStyle(
                                   fontSize: 15,
-                                  color: CupertinoColors.tertiaryLabel
-                                      .resolveFrom(context),
+                                  color: CupertinoColors.tertiaryLabel.color,
                                 ),
                               ),
                             ),

@@ -1,12 +1,13 @@
-import 'dart:typed_data';
-
 import 'package:flutter/cupertino.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../data/hours_draft_service.dart';
+import '../data/visit_report_service.dart';
 import '../models/job_order.dart';
+import '../models/signature_capture.dart';
 import '../widgets/summary_row.dart';
 import 'hours_week_screen.dart' show describeHoursSubmitError;
+import '../../../core/theme/app_colors.dart';
 
 /// Same key [BonDetailScreen] and the planning Gantt view read to show the
 /// job order as completed — set here once the publish call succeeds.
@@ -25,13 +26,15 @@ const _accentOrange = Color(0xFFFF6B2B);
 class WorkCompletionScreen extends StatefulWidget {
   final ServiceOrder order;
   final double totalUrenGeregistreerd;
-  final Uint8List? signatureBytes;
+  final SignatureCapture? signature;
+  final String? contactName;
 
   const WorkCompletionScreen({
     super.key,
     required this.order,
     required this.totalUrenGeregistreerd,
-    this.signatureBytes,
+    this.signature,
+    this.contactName,
   });
 
   @override
@@ -78,16 +81,86 @@ class _WorkCompletionScreenState extends State<WorkCompletionScreen> {
     if (mounted) setState(() => _dailyBreakdown = breakdown);
   }
 
+  /// Waarschuwt als het werkrapport ontbreekt of lege onderdelen heeft.
+  /// Niets is verplicht: de monteur kan altijd doorgaan.
+  Future<bool> _bevestigRapport() async {
+    final rapport = await VisitReportService.instance.laadWerkrapport(
+      widget.order.id,
+    );
+    final leeg = rapport?.legeOnderdelen ?? const <String>[];
+    if (rapport != null && leeg.isEmpty) return true;
+    if (!mounted) return false;
+    final tekst = rapport == null
+        ? 'Er is voor deze bon geen werkrapport ingevuld. Het bezoekrapport '
+              'bevat dan alleen uren en materialen.'
+        : 'Deze onderdelen van het werkrapport zijn leeg:\n\n'
+              '${leeg.map((t) => '• $t').join('\n')}';
+    final doorgaan = await showCupertinoDialog<bool>(
+      context: context,
+      builder: (ctx) => CupertinoAlertDialog(
+        title: Text(
+          rapport == null ? 'Geen werkrapport' : 'Werkrapport niet compleet',
+        ),
+        content: Text('$tekst\n\nToch publiceren?'),
+        actions: [
+          CupertinoDialogAction(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Annuleren'),
+          ),
+          CupertinoDialogAction(
+            isDefaultAction: true,
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('Toch publiceren'),
+          ),
+        ],
+      ),
+    );
+    return doorgaan == true;
+  }
+
   Future<void> _publish() async {
+    if (!await _bevestigRapport() || !mounted) return;
     setState(() {
       _publishing = true;
       _error = null;
     });
     try {
-      await HoursDraftService.instance.submitPendingHours(widget.order);
+      final resultaat = await HoursDraftService.instance.submitPendingHours(
+        widget.order,
+        signature: widget.signature,
+        signerName: widget.contactName,
+      );
       final prefs = await SharedPreferences.getInstance();
       await prefs.setBool(bonCompletedKey(widget.order.id), true);
       if (!mounted) return;
+      // De registratie is gelukt; meld het als rapport of bijlagen niet
+      // zijn meegekomen, zodat kantoor die eventueel zelf toevoegt.
+      final waarschuwingen = <String>[
+        if (resultaat != null && !resultaat.rapportMeegestuurd)
+          'Het getekende bezoekrapport kon niet worden meegestuurd.',
+        if (resultaat != null && resultaat.bijlagenMislukt)
+          "De foto's en documenten konden niet worden geüpload.",
+      ];
+      if (waarschuwingen.isNotEmpty) {
+        await showCupertinoDialog<void>(
+          context: context,
+          builder: (ctx) => CupertinoAlertDialog(
+            title: const Text('Bon gepubliceerd'),
+            content: Text(
+              '${waarschuwingen.join('\n')}\n\nUren en materialen staan wel '
+              'in Ridder.',
+            ),
+            actions: [
+              CupertinoDialogAction(
+                isDefaultAction: true,
+                onPressed: () => Navigator.of(ctx).pop(),
+                child: const Text('OK'),
+              ),
+            ],
+          ),
+        );
+        if (!mounted) return;
+      }
       setState(() {
         _publishing = false;
         _published = true;
@@ -124,13 +197,13 @@ class _WorkCompletionScreenState extends State<WorkCompletionScreen> {
     return CupertinoPageScaffold(
       backgroundColor: isDark ? CupertinoColors.black : const Color(0xFFF2F2F7),
       navigationBar: CupertinoNavigationBar(
-        backgroundColor: CupertinoColors.white,
+        backgroundColor: AppColors.navBar,
         border: null,
-        middle: const Text(
+        middle: Text(
           'Werk afronden',
           style: TextStyle(
             fontWeight: FontWeight.w600,
-            color: CupertinoColors.black,
+            color: AppColors.navForeground.resolveFrom(context),
           ),
         ),
       ),
@@ -217,12 +290,14 @@ class _WorkCompletionScreenState extends State<WorkCompletionScreen> {
                               ),
                               for (final card in day.cards)
                                 _HourEntryRow(
-                                  icon: card.label == 'Reistijd'
+                                  icon: card.isKm || card.label == 'Reistijd'
                                       ? CupertinoIcons.car_fill
                                       : CupertinoIcons.hammer_fill,
                                   label: card.label,
                                   memo: card.memo,
-                                  value: '${_fmtUren(card.hours)}u',
+                                  value: card.isKm
+                                      ? '${card.km} km'
+                                      : '${_fmtUren(card.hours)}u',
                                 ),
                             ],
                             Container(height: 0.5, color: border),
@@ -237,7 +312,7 @@ class _WorkCompletionScreenState extends State<WorkCompletionScreen> {
                 ),
               ),
               // ── Handtekening ───────────────────────────────────────────
-              if (widget.signatureBytes != null) ...[
+              if (widget.signature != null) ...[
                 const SizedBox(height: 20),
                 Text(
                   'HANDTEKENING KLANT'.toUpperCase(),
@@ -259,7 +334,7 @@ class _WorkCompletionScreenState extends State<WorkCompletionScreen> {
                   child: Padding(
                     padding: const EdgeInsets.all(8),
                     child: Image.memory(
-                      widget.signatureBytes!,
+                      widget.signature!.png,
                       fit: BoxFit.contain,
                     ),
                   ),
@@ -269,9 +344,9 @@ class _WorkCompletionScreenState extends State<WorkCompletionScreen> {
               if (_error != null) ...[
                 Text(
                   _error!,
-                  style: const TextStyle(
+                  style: TextStyle(
                     fontSize: 12,
-                    color: CupertinoColors.destructiveRed,
+                    color: CupertinoColors.destructiveRed.resolveFrom(context),
                   ),
                 ),
                 const SizedBox(height: 8),

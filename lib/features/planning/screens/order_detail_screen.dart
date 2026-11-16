@@ -3,11 +3,12 @@ import 'package:url_launcher/url_launcher.dart';
 
 import '../data/planning_repository.dart';
 import '../models/job_order.dart';
-import 'declarations_screen.dart';
+import '../../declaraties/screens/declaraties_screen.dart';
 import 'hours_week_screen.dart';
 import 'parts_list_screen.dart';
 import 'relation_detail_screen.dart';
 import 'service_object_detail_screen.dart';
+import '../../../core/theme/app_colors.dart';
 
 class OrderDetailScreen extends StatefulWidget {
   final ServiceOrder order;
@@ -219,7 +220,7 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
   void _openDeclarations() {
     Navigator.of(context).push(
       CupertinoPageRoute<void>(
-        builder: (_) => DeclarationsScreen(order: widget.order),
+        builder: (_) => DeclaratiesScreen(order: widget.order),
       ),
     );
   }
@@ -267,17 +268,17 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
 
     return CupertinoPageScaffold(
       navigationBar: CupertinoNavigationBar(
-        backgroundColor: CupertinoColors.white,
+        backgroundColor: AppColors.navBar,
         border: null,
         leading: CupertinoNavigationBarBackButton(
-          color: CupertinoColors.black,
+          color: AppColors.navForeground,
           onPressed: () => Navigator.of(context).pop(),
         ),
         middle: Text(
           order.orderNumber.isNotEmpty ? order.orderNumber : 'Order',
-          style: const TextStyle(
+          style: TextStyle(
             fontWeight: FontWeight.w600,
-            color: CupertinoColors.black,
+            color: AppColors.navForeground.resolveFrom(context),
           ),
         ),
       ),
@@ -305,11 +306,17 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
               bg: cardBg,
               border: borderColor,
               children: [
-                if (order.mechanic != null)
+                if (order.assignedMechanics.isNotEmpty)
                   _InfoRow(
-                    icon: CupertinoIcons.person,
-                    label: 'Monteur',
-                    value: order.mechanic!.name,
+                    icon: order.assignedMechanics.length > 1
+                        ? CupertinoIcons.person_2
+                        : CupertinoIcons.person,
+                    label: order.assignedMechanics.length > 1
+                        ? 'Monteurs'
+                        : 'Monteur',
+                    value: order.assignedMechanics
+                        .map((m) => m.name)
+                        .join('\n'),
                   ),
                 if (order.serviceType.isNotEmpty)
                   _InfoRow(
@@ -1096,7 +1103,7 @@ class _TimeActionBar extends StatelessWidget {
           _TimeActionButton(
             icon: CupertinoIcons.cube_box,
             label: 'Onderdelen',
-            color: CupertinoColors.systemOrange,
+            color: CupertinoColors.systemOrange.resolveFrom(context),
             onTap: onOnderdelen,
           ),
           const SizedBox(width: 8),

@@ -1,16 +1,19 @@
 import 'dart:async';
+import 'dart:ui' show FontFeature;
 
 import 'package:flutter/cupertino.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../core/auth/auth_service.dart';
 import '../features/planning/data/planning_repository.dart';
-import '../features/planning/models/job_order.dart' show ServiceOrder;
+import '../features/planning/models/job_order.dart'
+    show ServiceOrder, ServicePerson;
 import '../features/planning/screens/bon_detail_screen.dart';
 import '../features/planning/screens/work_completion_screen.dart'
     show bonCompletedKey;
 import '../widgets/engine_logo.dart';
 import '../widgets/nav_border.dart';
+import '../core/theme/app_colors.dart';
 
 class ProjectenScreen extends StatefulWidget {
   const ProjectenScreen({super.key});
@@ -22,6 +25,10 @@ class ProjectenScreen extends StatefulWidget {
 class _ProjectenScreenState extends State<ProjectenScreen> {
   List<ServiceOrder> _orders = [];
   String _query = '';
+
+  /// Alleen voor medewerkers die alle bonnen mogen zien: false = alleen mijn
+  /// eigen bonnen tonen.
+  bool _alleBonnen = true;
   bool _loading = true;
   String? _error;
 
@@ -86,7 +93,11 @@ class _ProjectenScreenState extends State<ProjectenScreen> {
         return;
       }
       final orders = await PlanningRepository.instance.fetchServiceOrders();
-      final myOrders = orders.where((o) => o.mechanic?.id == myId).toList()
+      // Wim en Jos krijgen alle bonnen; iedereen anders alleen de eigen.
+      final zichtbaar = AuthService.instance.seesAllBonnen
+          ? orders
+          : orders.where((o) => o.isAssignedTo(myId)).toList();
+      final myOrders = zichtbaar.toList()
         ..sort((a, b) {
           final ad = a.planningDate;
           final bd = b.planningDate;
@@ -137,23 +148,31 @@ class _ProjectenScreenState extends State<ProjectenScreen> {
   }
 
   List<ServiceOrder> get _filtered {
-    if (_query.isEmpty) return _orders;
+    final myId = AuthService.instance.currentMechanicId;
+    final basis =
+        AuthService.instance.seesAllBonnen || myId == null
+        ? (_alleBonnen || myId == null
+              ? _orders
+              : _orders.where((o) => o.isAssignedTo(myId)).toList())
+        : _orders;
+    if (_query.isEmpty) return basis;
     final q = _query.toLowerCase();
-    return _orders.where((o) {
+    return basis.where((o) {
       return o.description.toLowerCase().contains(q) ||
           o.orderNumber.toLowerCase().contains(q) ||
           o.relationName.toLowerCase().contains(q) ||
-          o.location.toLowerCase().contains(q);
+          o.location.toLowerCase().contains(q) ||
+          o.assignedMechanics.any((m) => m.name.toLowerCase().contains(q));
     }).toList();
   }
 
   @override
   Widget build(BuildContext context) {
     return CupertinoPageScaffold(
-      backgroundColor: const Color(0xFFF2F2F7),
+      backgroundColor: AppColors.page,
       resizeToAvoidBottomInset: false,
       navigationBar: const CupertinoNavigationBar(
-        backgroundColor: Color(0xFFFFFFFF),
+        backgroundColor: AppColors.navBar,
         border: null,
         padding: EdgeInsetsDirectional.symmetric(horizontal: 20),
         middle: EngineLogo(),
@@ -172,6 +191,9 @@ class _ProjectenScreenState extends State<ProjectenScreen> {
                       : _Body(
                           orders: _filtered,
                           query: _query,
+                          toonAlleSchakelaar: AuthService.instance.seesAllBonnen,
+                          alleBonnen: _alleBonnen,
+                          onAlleBonnen: (v) => setState(() => _alleBonnen = v),
                           completedIds: _completedIds,
                           onQueryChanged: (v) => setState(() => _query = v),
                           onRefresh: _refresh,
@@ -249,6 +271,9 @@ class _CompletedBanner extends StatelessWidget {
 class _Body extends StatelessWidget {
   final List<ServiceOrder> orders;
   final String query;
+  final bool toonAlleSchakelaar;
+  final bool alleBonnen;
+  final ValueChanged<bool> onAlleBonnen;
   final Set<String> completedIds;
   final ValueChanged<String> onQueryChanged;
   final Future<void> Function() onRefresh;
@@ -257,11 +282,97 @@ class _Body extends StatelessWidget {
   const _Body({
     required this.orders,
     required this.query,
+    required this.toonAlleSchakelaar,
+    required this.alleBonnen,
+    required this.onAlleBonnen,
     required this.completedIds,
     required this.onQueryChanged,
     required this.onRefresh,
     required this.onOpenBon,
   });
+
+  static const _dagAfk = ['ma', 'di', 'wo', 'do', 'vr', 'za', 'zo'];
+  static const _maandAfk = [
+    '', 'jan', 'feb', 'mrt', 'apr', 'mei', 'jun',
+    'jul', 'aug', 'sep', 'okt', 'nov', 'dec',
+  ];
+
+  /// "Vandaag", "Morgen", "wo 2 okt" (binnen een week), anders "2 okt";
+  /// in een ander jaar met het jaartal erbij.
+  static String _dagLabel(DateTime? d, DateTime today) {
+    if (d == null) return 'Geen datum';
+    final verschil = DateTime(d.year, d.month, d.day).difference(today).inDays;
+    if (verschil == 0) return 'Vandaag';
+    if (verschil == 1) return 'Morgen';
+    if (verschil == -1) return 'Gisteren';
+    final datum = '${d.day} ${_maandAfk[d.month]}';
+    final jaar = d.year != today.year ? ' ${d.year}' : '';
+    if (verschil.abs() <= 6) {
+      return '${_dagAfk[d.weekday - 1]} $datum$jaar';
+    }
+    return '$datum$jaar';
+  }
+
+  /// De bonnen gegroepeerd per startdag, met een daglabel boven elke groep.
+  Widget _dagGroepen(
+    List<ServiceOrder> bonnen,
+    DateTime today, {
+    required bool oplopend,
+    required double eersteRuimte,
+  }) {
+    final groepen = <DateTime?, List<ServiceOrder>>{};
+    for (final o in bonnen) {
+      final d = o.planningDate;
+      final dag = d == null ? null : DateTime(d.year, d.month, d.day);
+      groepen.putIfAbsent(dag, () => []).add(o);
+    }
+    final dagen = groepen.keys.toList()
+      ..sort((a, b) {
+        if (a == null) return 1;
+        if (b == null) return -1;
+        return oplopend ? a.compareTo(b) : b.compareTo(a);
+      });
+
+    final rijen = <Widget>[];
+    for (var g = 0; g < dagen.length; g++) {
+      final dag = dagen[g];
+      rijen.add(
+        Builder(
+          builder: (context) => Padding(
+            padding: EdgeInsets.fromLTRB(20, g == 0 ? eersteRuimte : 10, 20, 6),
+            child: Text(
+              _dagLabel(dag, today),
+              style: TextStyle(
+                fontSize: 13,
+                fontWeight: FontWeight.w600,
+                color: _dagLabel(dag, today) == 'Vandaag'
+                    ? const Color(0xFFFF6B2B)
+                    : CupertinoColors.secondaryLabel.resolveFrom(context),
+              ),
+            ),
+          ),
+        ),
+      );
+      for (final o in groepen[dag]!) {
+        rijen.add(
+          Padding(
+            padding: const EdgeInsets.only(bottom: 8),
+            child: _OrderCard(
+              order: o,
+              completed: completedIds.contains(o.id),
+              onTap: () => onOpenBon(o),
+            ),
+          ),
+        );
+      }
+    }
+    return SliverList(
+      delegate: SliverChildBuilderDelegate(
+        (context, i) => rijen[i],
+        childCount: rijen.length,
+      ),
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -313,45 +424,46 @@ class _Body extends StatelessWidget {
           ),
         ),
 
+        if (toonAlleSchakelaar)
+          SliverToBoxAdapter(
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(16, 8, 16, 4),
+              child: CupertinoSlidingSegmentedControl<bool>(
+                groupValue: alleBonnen,
+                onValueChanged: (v) {
+                  if (v != null) onAlleBonnen(v);
+                },
+                children: const {
+                  true: Padding(
+                    padding: EdgeInsets.symmetric(vertical: 4),
+                    child: Text('Alle bonnen', style: TextStyle(fontSize: 13)),
+                  ),
+                  false: Padding(
+                    padding: EdgeInsets.symmetric(vertical: 4),
+                    child: Text('Mijn bonnen', style: TextStyle(fontSize: 13)),
+                  ),
+                },
+              ),
+            ),
+          ),
+
         if (orders.isEmpty)
           SliverFillRemaining(
             child: Center(
               child: Text(
                 query.isEmpty ? 'Geen projecten gevonden' : 'Geen resultaten',
-                style: const TextStyle(color: CupertinoColors.secondaryLabel),
+                style: TextStyle(
+                  color: CupertinoColors.secondaryLabel.resolveFrom(context),
+                ),
               ),
             ),
           )
         else ...[
           if (upcoming.isNotEmpty) ...[
-            _SectionHeader(title: 'Aankomend', count: upcoming.length),
-            SliverList(
-              delegate: SliverChildBuilderDelegate(
-                (context, i) => GestureDetector(
-                  onTap: () => onOpenBon(upcoming[i]),
-                  child: _OrderCard(
-                    order: upcoming[i],
-                    completed: completedIds.contains(upcoming[i].id),
-                  ),
-                ),
-                childCount: upcoming.length,
-              ),
-            ),
+            _dagGroepen(upcoming, today, oplopend: true, eersteRuimte: 12),
           ],
           if (past.isNotEmpty) ...[
-            _SectionHeader(title: 'Afgelopen', count: past.length),
-            SliverList(
-              delegate: SliverChildBuilderDelegate(
-                (context, i) => GestureDetector(
-                  onTap: () => onOpenBon(past[i]),
-                  child: _OrderCard(
-                    order: past[i],
-                    completed: completedIds.contains(past[i].id),
-                  ),
-                ),
-                childCount: past.length,
-              ),
-            ),
+            _dagGroepen(past, today, oplopend: false, eersteRuimte: 20),
           ],
         ],
 
@@ -378,10 +490,10 @@ class _SectionHeader extends StatelessWidget {
           children: [
             Text(
               title.toUpperCase(),
-              style: const TextStyle(
+              style: TextStyle(
                 fontSize: 12,
                 fontWeight: FontWeight.w600,
-                color: CupertinoColors.secondaryLabel,
+                color: CupertinoColors.secondaryLabel.resolveFrom(context),
                 letterSpacing: 0.5,
               ),
             ),
@@ -389,15 +501,17 @@ class _SectionHeader extends StatelessWidget {
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
               decoration: BoxDecoration(
-                color: CupertinoColors.secondaryLabel.withValues(alpha: 0.12),
+                color: CupertinoColors.secondaryLabel
+                    .resolveFrom(context)
+                    .withValues(alpha: 0.12),
                 borderRadius: BorderRadius.circular(8),
               ),
               child: Text(
                 '$count',
-                style: const TextStyle(
+                style: TextStyle(
                   fontSize: 11,
                   fontWeight: FontWeight.w600,
-                  color: CupertinoColors.secondaryLabel,
+                  color: CupertinoColors.secondaryLabel.resolveFrom(context),
                 ),
               ),
             ),
@@ -410,154 +524,286 @@ class _SectionHeader extends StatelessWidget {
 
 // ─── Order card ────────────────────────────────────────────────────────────────
 
-class _OrderCard extends StatelessWidget {
+/// Kaart in de bonnenlijst (ontwerp 6c): de klant voorop, een type-icoon
+/// links, het werk als titel, object- en bonnummer in één grijze regel, en
+/// avatars van de monteurs rechts als er meerdere op de bon staan.
+class _OrderCard extends StatefulWidget {
   final ServiceOrder order;
   final bool completed;
+  final VoidCallback onTap;
 
-  const _OrderCard({required this.order, this.completed = false});
+  const _OrderCard({
+    required this.order,
+    required this.onTap,
+    this.completed = false,
+  });
 
-  static const _months = [
-    '',
-    'jan',
-    'feb',
-    'mrt',
-    'apr',
-    'mei',
-    'jun',
-    'jul',
-    'aug',
-    'sep',
-    'okt',
-    'nov',
-    'dec',
-  ];
+  @override
+  State<_OrderCard> createState() => _OrderCardState();
+}
 
-  String _formatDate(DateTime? d) {
-    if (d == null) return '—';
-    return '${d.day} ${_months[d.month]}';
+class _OrderCardState extends State<_OrderCard> {
+  bool _ingedrukt = false;
+
+  static const _accent = Color(0xFFFF6B2B);
+
+  /// (achtergrond, iconkleur, icoon) op basis van het type van de bon.
+  static (Color, Color, IconData) _typeIcoon(ServiceOrder o, bool geenOmschrijving) {
+    final t = o.serviceType.toLowerCase();
+    if (t.contains('storing')) {
+      return (const Color(0xFFFFE5E5), const Color(0xFFD70015), CupertinoIcons.bolt_fill);
+    }
+    if (t.contains('lever')) {
+      return (const Color(0xFFE6F9EC), const Color(0xFF248A3D), CupertinoIcons.cube_box);
+    }
+    if (geenOmschrijving) {
+      return (const Color(0xFFF2F2F7), const Color(0x733C3C43), CupertinoIcons.doc_text);
+    }
+    return (const Color(0xFFFFE9DE), _accent, CupertinoIcons.wrench);
   }
 
   @override
   Widget build(BuildContext context) {
+    final order = widget.order;
+    final completed = widget.completed;
     final isDark = CupertinoTheme.brightnessOf(context) == Brightness.dark;
     const completedColor = Color(0xFF34C759);
-    final cardBg = completed
+
+    final kaartKleur = completed
         ? completedColor.withValues(alpha: isDark ? 0.14 : 0.08)
         : isDark
-        ? const Color(0xFF1C1C1E)
-        : CupertinoColors.systemBackground;
-    final title = order.description.isNotEmpty
-        ? order.description
-        : order.orderNumber;
+        ? (_ingedrukt ? const Color(0xFF232324) : const Color(0xFF1C1C1E))
+        : (_ingedrukt ? const Color(0xFFF7F7F9) : CupertinoColors.white);
 
-    return Container(
-      margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 5),
-      decoration: BoxDecoration(
-        color: cardBg,
-        borderRadius: BorderRadius.circular(14),
-        border: Border.all(
-          color: completed
-              ? completedColor.withValues(alpha: 0.4)
-              : isDark
-              ? const Color(0xFF38383A)
-              : const Color(0xFFE5E5EA),
-          width: completed ? 1.5 : 1,
-        ),
-      ),
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(16, 14, 16, 14),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            // Title + date row
-            Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                if (completed) ...[
-                  const Icon(
-                    CupertinoIcons.checkmark_alt_circle_fill,
-                    size: 18,
-                    color: completedColor,
-                  ),
-                  const SizedBox(width: 6),
-                ],
-                Expanded(
-                  child: Text(
-                    title,
-                    style: TextStyle(
-                      fontSize: 17,
-                      fontWeight: FontWeight.w600,
-                      height: 1.3,
-                      color: CupertinoColors.label.resolveFrom(context),
-                    ),
-                  ),
-                ),
-                const SizedBox(width: 8),
-                Text(
-                  _formatDate(order.planningDate),
-                  style: const TextStyle(
-                    fontSize: 13,
-                    fontWeight: FontWeight.w500,
-                    color: Color(0xFFFF6B2B),
-                  ),
-                ),
-              ],
-            ),
+    final omschrijving = order.description.trim();
+    final geenOmschrijving = omschrijving.isEmpty || omschrijving == order.orderNumber;
+    final (tegelBg, tegelFg, icoon) = _typeIcoon(order, geenOmschrijving);
 
-            if (order.serviceObjectTag.isNotEmpty) ...[
-              const SizedBox(height: 4),
-              Text(
-                order.serviceObjectTag,
-                style: TextStyle(
-                  fontSize: 14,
-                  color: CupertinoColors.secondaryLabel.resolveFrom(context),
+    final secundair = CupertinoColors.secondaryLabel.resolveFrom(context);
+    final meta = [
+      if (order.serviceObjectTag.isNotEmpty) order.serviceObjectTag,
+      if (order.orderNumber.isNotEmpty) '#${order.orderNumber}',
+    ].join(' · ');
+
+    final ik = AuthService.instance.currentMechanicId;
+    final monteurs = order.assignedMechanics;
+    final ikStaatErop = monteurs.any((m) => m.id == ik);
+    // Avatars: bij meerdere monteurs. Kijk ik naar een bon waar ik zelf niet
+    // op sta (Wim/Jos), dan ook bij één monteur, met de namen eronder.
+    final toonAvatars = monteurs.length > 1 || (!ikStaatErop && monteurs.isNotEmpty);
+    final anderen = [
+      for (final m in monteurs)
+        if (m.id != ik && m.name.trim().isNotEmpty) m,
+    ];
+    final namenRegel = ikStaatErop || anderen.isEmpty
+        ? null
+        : anderen.map((m) => m.name.trim()).join(', ');
+
+    return GestureDetector(
+      onTap: widget.onTap,
+      onTapDown: (_) => setState(() => _ingedrukt = true),
+      onTapUp: (_) => setState(() => _ingedrukt = false),
+      onTapCancel: () => setState(() => _ingedrukt = false),
+      behavior: HitTestBehavior.opaque,
+      child: AnimatedScale(
+        scale: _ingedrukt ? 0.98 : 1,
+        duration: const Duration(milliseconds: 120),
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 120),
+          margin: const EdgeInsets.symmetric(horizontal: 16),
+          padding: const EdgeInsets.all(12),
+          decoration: BoxDecoration(
+            color: kaartKleur,
+            borderRadius: BorderRadius.circular(18),
+            border: completed
+                ? Border.all(color: completedColor.withValues(alpha: 0.4), width: 1.5)
+                : null,
+          ),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.center,
+            children: [
+              Container(
+                width: 42,
+                height: 42,
+                decoration: BoxDecoration(
+                  color: isDark ? tegelFg.withValues(alpha: 0.2) : tegelBg,
+                  borderRadius: BorderRadius.circular(13),
                 ),
+                child: Icon(icoon, size: 20, color: tegelFg),
               ),
-            ],
-
-            if (order.relationName.isNotEmpty || order.orderNumber.isNotEmpty) ...[
-              const SizedBox(height: 10),
-              Row(
-                children: [
-                  if (order.relationName.isNotEmpty) ...[
-                    Icon(
-                      CupertinoIcons.person_2,
-                      size: 13,
-                      color: CupertinoColors.secondaryLabel.resolveFrom(context),
-                    ),
-                    const SizedBox(width: 4),
-                    Expanded(
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    if (order.relationName.isNotEmpty)
+                      Row(
+                        children: [
+                          if (completed) ...[
+                            const Icon(
+                              CupertinoIcons.checkmark_alt_circle_fill,
+                              size: 13,
+                              color: completedColor,
+                            ),
+                            const SizedBox(width: 4),
+                          ],
+                          Expanded(
+                            child: Text(
+                              order.relationName.toUpperCase(),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(
+                                fontSize: 12,
+                                fontWeight: FontWeight.w600,
+                                letterSpacing: 0.2,
+                                color: secundair,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    Padding(
+                      padding: const EdgeInsets.only(top: 1),
                       child: Text(
-                        order.relationName,
+                        geenOmschrijving ? 'Geen omschrijving' : omschrijving,
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
                         style: TextStyle(
-                          fontSize: 13,
-                          color: CupertinoColors.secondaryLabel.resolveFrom(
-                            context,
+                          fontSize: 16,
+                          fontWeight: FontWeight.w600,
+                          color: geenOmschrijving
+                              ? secundair
+                              : CupertinoColors.label.resolveFrom(context),
+                        ),
+                      ),
+                    ),
+                    if (meta.isNotEmpty)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 2),
+                        child: Text(
+                          meta,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            fontSize: 12,
+                            color: isDark ? const Color(0x73EBEBF5) : const Color(0x733C3C43),
+                            fontFeatures: const [FontFeature.tabularFigures()],
                           ),
                         ),
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
                       ),
-                    ),
-                  ] else
-                    const Spacer(),
-                  if (order.orderNumber.isNotEmpty) ...[
-                    const SizedBox(width: 12),
-                    Text(
-                      order.orderNumber,
-                      style: TextStyle(
-                        fontSize: 13,
-                        color: CupertinoColors.tertiaryLabel.resolveFrom(
-                          context,
+                    if (namenRegel != null)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 2),
+                        child: Text(
+                          'Met $namenRegel',
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(fontSize: 12, color: secundair),
                         ),
                       ),
-                    ),
                   ],
-                ],
+                ),
               ),
+              if (toonAvatars) ...[
+                const SizedBox(width: 8),
+                _MonteurAvatars(
+                  monteurs: monteurs,
+                  ikId: ik,
+                  ringKleur: kaartKleur,
+                ),
+              ],
             ],
-          ],
+          ),
         ),
+      ),
+    );
+  }
+}
+
+/// Overlappende avatars van de monteurs (max. 3, daarna "+n"). De ingelogde
+/// gebruiker staat eerst als "jij" in oranje.
+class _MonteurAvatars extends StatelessWidget {
+  final List<ServicePerson> monteurs;
+  final int? ikId;
+  final Color ringKleur;
+
+  const _MonteurAvatars({
+    required this.monteurs,
+    required this.ikId,
+    required this.ringKleur,
+  });
+
+  static const _kleuren = [
+    Color(0xFF007AFF),
+    Color(0xFF34C759),
+    Color(0xFF5856D6),
+  ];
+
+  static String _initialen(String naam) {
+    final delen = naam.trim().split(RegExp(r'\s+')).where((d) => d.isNotEmpty);
+    if (delen.isEmpty) return '?';
+    final eerste = delen.first[0];
+    final laatste = delen.length > 1 ? delen.last[0] : '';
+    return (eerste + laatste).toUpperCase();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final jij = monteurs.where((m) => m.id == ikId).toList();
+    final anderen = monteurs.where((m) => m.id != ikId).toList();
+    final gesorteerd = [...jij, ...anderen];
+    const max = 3;
+    final getoond = gesorteerd.take(max).toList();
+    final rest = gesorteerd.length - getoond.length;
+
+    Widget cirkel(String tekst, Color bg, {Color fg = CupertinoColors.white, double fs = 10}) =>
+        Container(
+          width: 26,
+          height: 26,
+          alignment: Alignment.center,
+          decoration: BoxDecoration(
+            shape: BoxShape.circle,
+            color: bg,
+            border: Border.all(color: ringKleur, width: 2),
+          ),
+          child: Text(
+            tekst,
+            style: TextStyle(fontSize: fs, fontWeight: FontWeight.w700, color: fg),
+          ),
+        );
+
+    final items = <Widget>[];
+    var kleurIndex = 0;
+    for (final m in getoond) {
+      if (m.id == ikId) {
+        items.add(cirkel('jij', const Color(0xFFFF6B2B)));
+      } else {
+        items.add(
+          cirkel(_initialen(m.name), _kleuren[kleurIndex % _kleuren.length]),
+        );
+        kleurIndex++;
+      }
+    }
+    if (rest > 0) {
+      items.add(
+        cirkel(
+          '+$rest',
+          const Color(0xFFE5E5EA),
+          fg: CupertinoColors.secondaryLabel.resolveFrom(context),
+        ),
+      );
+    }
+
+    // Overlap van 6px tussen de cirkels.
+    const stap = 20.0;
+    return SizedBox(
+      width: 26 + stap * (items.length - 1),
+      height: 26,
+      child: Stack(
+        children: [
+          for (var i = 0; i < items.length; i++)
+            Positioned(left: stap * i, child: items[i]),
+        ],
       ),
     );
   }
@@ -579,10 +825,10 @@ class _ErrorView extends StatelessWidget {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            const Icon(
+            Icon(
               CupertinoIcons.exclamationmark_circle,
               size: 40,
-              color: CupertinoColors.destructiveRed,
+              color: CupertinoColors.destructiveRed.resolveFrom(context),
             ),
             const SizedBox(height: 12),
             Text(

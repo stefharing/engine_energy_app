@@ -8,10 +8,15 @@ import '../../../core/auth/auth_service.dart';
 import '../../../widgets/nav_border.dart';
 import 'planning_settings_screen.dart';
 import 'bon_detail_screen.dart';
+import '../../../core/theme/app_colors.dart';
 
 const _leftColWidth = 72.0;
 const _rowMinHeight = 48.0;
 const _rowMaxHeight = 88.0;
+
+/// Minimum height per lane when items overlap — enough for one line of
+/// text. A row with more overlapping items than fit grows instead.
+const _laneMinHeight = 22.0;
 const _headerHeight = 40.0;
 const _visibleDays = 2.5;
 
@@ -52,6 +57,7 @@ class _PlanningScreenState extends State<PlanningScreen> {
   Set<int> _hiddenIds = {};
   List<int> _employeeOrder = [];
   bool _loading = true;
+  bool _refreshing = false;
   String? _error;
   final _hScroll = ScrollController();
 
@@ -114,6 +120,46 @@ class _PlanningScreenState extends State<PlanningScreen> {
     }
   }
 
+  /// Verversknop: haalt bonnen, medewerkers en afspraken opnieuw op zonder de
+  /// planning te vervangen door een spinner of naar vandaag te springen.
+  Future<void> _refresh() async {
+    if (_refreshing || _loading) return;
+    setState(() => _refreshing = true);
+    try {
+      final results = await Future.wait([
+        PlanningRepository.instance.fetchServiceOrders(),
+        PlanningRepository.instance.fetchEmployees(),
+        PlanningRepository.instance.fetchAppointments(),
+      ]);
+      if (!mounted) return;
+      setState(() {
+        _allOrders = results[0] as List<ServiceOrder>;
+        _employees = results[1] as List<ServicePerson>;
+        _allAppointments = results[2] as List<Appointment>;
+        _error = null;
+        _refreshing = false;
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() => _refreshing = false);
+      showCupertinoDialog<void>(
+        context: context,
+        builder: (ctx) => CupertinoAlertDialog(
+          title: const Text('Verversen mislukt'),
+          content: const Text(
+            'De planning kon niet worden opgehaald. Controleer je verbinding en probeer het opnieuw.',
+          ),
+          actions: [
+            CupertinoDialogAction(
+              onPressed: () => Navigator.of(ctx).pop(),
+              child: const Text('OK'),
+            ),
+          ],
+        ),
+      );
+    }
+  }
+
   /// Scroll to today's column after the layout has been built.
   void _scrollToToday() {
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -139,13 +185,18 @@ class _PlanningScreenState extends State<PlanningScreen> {
   /// (e.g. "Holland Diesel Maassluis B.V. 200027.1 3000 HR service ...").
   /// Such appointments duplicate the job order block, so they're filtered
   /// out here — only genuine (non-order-linked) appointments remain as
-  /// separate agenda-items.
+  /// separate agenda-items. The reliable signal is the appointment's
+  /// `appointmentaction` being linked to the job order (that's also how
+  /// every extra mechanic's appointment looks); the recordtag-in-title
+  /// check stays as a fallback.
   bool _appointmentIsOrder(Appointment appt) => _allOrders.any(
-        (o) =>
-            o.recordTag.isNotEmpty &&
-            o.mechanicId == appt.mechanicId &&
-            appt.description.contains(o.recordTag),
-      );
+    (o) =>
+        o.appointmentActionIds.contains(appt.appointmentActionId) ||
+        (o.recordTag.isNotEmpty &&
+            appt.employee != null &&
+            o.isAssignedTo(appt.employee!.id) &&
+            appt.description.contains(o.recordTag)),
+  );
 
   List<PlanningItem> get _allItems => [
     ..._allOrders,
@@ -212,25 +263,42 @@ class _PlanningScreenState extends State<PlanningScreen> {
   }
 
   List<PlanningItem> _itemsForMechanic(ServicePerson m) =>
-      _allItems.where((o) => o.mechanicId == m.id).toList();
+      _allItems.where((o) => o.isAssignedTo(m.id)).toList();
 
   @override
   Widget build(BuildContext context) {
     return CupertinoPageScaffold(
-      backgroundColor: const Color(0xFFF2F2F7),
+      backgroundColor: AppColors.page,
       navigationBar: CupertinoNavigationBar(
-        backgroundColor: const Color(0xFFFFFFFF),
+        backgroundColor: AppColors.navBar,
         border: null,
         padding: const EdgeInsetsDirectional.symmetric(horizontal: 20),
         middle: const EngineLogo(),
+        leading: GestureDetector(
+          onTap: _refresh,
+          behavior: HitTestBehavior.opaque,
+          child: SizedBox(
+            width: 44,
+            height: 44,
+            child: Center(
+              child: _refreshing
+                  ? const CupertinoActivityIndicator(radius: 9)
+                  : Icon(
+                      CupertinoIcons.arrow_clockwise,
+                      color: AppColors.navForeground.resolveFrom(context),
+                      size: 18,
+                    ),
+            ),
+          ),
+        ),
         trailing: GestureDetector(
           onTap: _openSettings,
           behavior: HitTestBehavior.opaque,
-          child: const Padding(
-            padding: EdgeInsets.all(10),
+          child: Padding(
+            padding: const EdgeInsets.all(10),
             child: Icon(
               CupertinoIcons.ellipsis,
-              color: CupertinoColors.black,
+              color: AppColors.navForeground.resolveFrom(context),
               size: 18,
             ),
           ),
@@ -325,6 +393,14 @@ class _TimetableViewState extends State<_TimetableView> {
             ? const Color(0xFF1C1C1E)
             : const Color(0xFFF2F2F7);
 
+        final itemsPerRow = [
+          for (final m in widget.mechanics) widget.itemsForMechanic(m),
+        ];
+        final rowHeights = [
+          for (final items in itemsPerRow)
+            _MechanicRow.heightFor(items, widget.days, rowHeight),
+        ];
+
         return Column(
           children: [
             // ── Sticky day header ──
@@ -384,7 +460,7 @@ class _TimetableViewState extends State<_TimetableView> {
                           for (int i = 0; i < widget.mechanics.length; i++)
                             _NameCell(
                               mechanic: widget.mechanics[i],
-                              rowHeight: rowHeight,
+                              rowHeight: rowHeights[i],
                               borderColor: borderColor,
                               isLast: i == widget.mechanics.length - 1,
                               isCurrentUser:
@@ -407,12 +483,10 @@ class _TimetableViewState extends State<_TimetableView> {
                               for (int i = 0; i < widget.mechanics.length; i++)
                                 _MechanicRow(
                                   mechanic: widget.mechanics[i],
-                                  items: widget.itemsForMechanic(
-                                    widget.mechanics[i],
-                                  ),
+                                  items: itemsPerRow[i],
                                   days: widget.days,
                                   dayWidth: dayWidth,
-                                  rowHeight: rowHeight,
+                                  rowHeight: rowHeights[i],
                                   borderColor: gridBorderColor,
                                   isLast: i == widget.mechanics.length - 1,
                                   hScroll: widget.hScroll,
@@ -475,6 +549,19 @@ class _DayHeaderCell extends StatelessWidget {
 
   bool get _isFirstOfMonth => day.day == 1;
 
+  bool get _isMonday => day.weekday == DateTime.monday;
+
+  /// ISO-8601 weeknummer (week 1 bevat de eerste donderdag van het jaar).
+  int get _weekNumber {
+    final donderdag = DateTime.utc(
+      day.year,
+      day.month,
+      day.day,
+    ).add(Duration(days: DateTime.thursday - day.weekday));
+    final jan1 = DateTime.utc(donderdag.year, 1, 1);
+    return (donderdag.difference(jan1).inDays ~/ 7) + 1;
+  }
+
   bool get _isWeekend => day.weekday >= 6;
 
   @override
@@ -484,21 +571,48 @@ class _DayHeaderCell extends StatelessWidget {
         ? const Color(0xFF2C2C2E)
         : const Color(0xFFF2F2F7);
     final labelColor = _isToday
-        ? CupertinoColors.activeBlue
+        ? CupertinoColors.activeBlue.resolveFrom(context)
         : CupertinoColors.secondaryLabel.resolveFrom(context);
 
     return Container(
       width: width,
       decoration: BoxDecoration(
         color: _isToday
-            ? CupertinoColors.activeBlue.withValues(alpha: 0.10)
+            ? CupertinoColors.activeBlue
+                  .resolveFrom(context)
+                  .withValues(alpha: 0.10)
             : _isWeekend
             ? weekendBg
             : baseBg,
         border: Border(right: BorderSide(color: borderColor)),
       ),
       child: Center(
-        child: _isFirstOfMonth
+        child: _isMonday
+            ? Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Text(
+                    'WK ${_weekNumber}',
+                    style: TextStyle(
+                      fontSize: 9,
+                      fontWeight: FontWeight.w700,
+                      color: labelColor,
+                      letterSpacing: 0.5,
+                    ),
+                  ),
+                  Text(
+                    _isFirstOfMonth
+                        ? '${day.day} ${_months[day.month]}'
+                        : 'Ma ${day.day}',
+                    style: TextStyle(
+                      fontSize: 13,
+                      fontWeight: _isToday ? FontWeight.w700 : FontWeight.w500,
+                      color: labelColor,
+                    ),
+                  ),
+                ],
+              )
+            : _isFirstOfMonth
             ? Column(
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
@@ -572,10 +686,12 @@ class _NameCell extends StatelessWidget {
     final isDark = CupertinoTheme.brightnessOf(context) == Brightness.dark;
     final baseBg = isDark ? const Color(0xFF1C1C1E) : const Color(0xFFF2F2F7);
     final bg = isCurrentUser
-        ? CupertinoColors.activeOrange.withValues(alpha: 0.08)
+        ? CupertinoColors.activeOrange
+              .resolveFrom(context)
+              .withValues(alpha: 0.08)
         : baseBg;
     final fg = isCurrentUser
-        ? CupertinoColors.activeOrange
+        ? CupertinoColors.activeOrange.resolveFrom(context)
         : CupertinoColors.secondaryLabel.resolveFrom(context);
     final firstName = mechanic.name.split(' ').first;
 
@@ -653,14 +769,30 @@ class _MechanicRow extends StatelessWidget {
     return spanDays * dayWidth - 4;
   }
 
-  bool _isVisible(PlanningItem o) {
+  static bool _isVisibleIn(PlanningItem o, List<DateTime> days) {
     final date = o.planningDate;
     if (date == null) return false;
     final day = DateTime(date.year, date.month, date.day);
     return !day.isBefore(days.first) && !day.isAfter(days.last);
   }
 
-  DateTime _endDay(PlanningItem o) {
+  bool _isVisible(PlanningItem o) => _isVisibleIn(o, days);
+
+  /// [baseHeight], or taller if this row's most-overlapped cluster needs
+  /// more lanes than fit at [_laneMinHeight] each.
+  static double heightFor(
+    List<PlanningItem> items,
+    List<DateTime> days,
+    double baseHeight,
+  ) {
+    final visible = items.where((o) => _isVisibleIn(o, days)).toList();
+    final (lanes: _, :clusterSize) = _computeLanes(visible);
+    final maxLanes = clusterSize.values.fold(1, (a, b) => a > b ? a : b);
+    final needed = 12 + maxLanes * _laneMinHeight;
+    return needed > baseHeight ? needed : baseHeight;
+  }
+
+  static DateTime _endDay(PlanningItem o) {
     final start = o.planningDate!;
     final end = o.endTime ?? start;
     return DateTime(end.year, end.month, end.day);
@@ -672,7 +804,7 @@ class _MechanicRow extends StatelessWidget {
   /// height — only shrinks for items that actually overlap something.
   /// A lone item elsewhere in the row stays full height even if this
   /// mechanic has a double-booking on another day.
-  ({Map<PlanningItem, int> lanes, Map<PlanningItem, int> clusterSize})
+  static ({Map<PlanningItem, int> lanes, Map<PlanningItem, int> clusterSize})
   _computeLanes(List<PlanningItem> visible) {
     if (visible.isEmpty) return (lanes: {}, clusterSize: {});
 
@@ -751,7 +883,9 @@ class _MechanicRow extends StatelessWidget {
         : CupertinoColors.systemBackground;
     final todayBg = isDark
         ? const Color(0xFF1A2A3A)
-        : CupertinoColors.activeBlue.withValues(alpha: 0.05);
+        : CupertinoColors.activeBlue
+              .resolveFrom(context)
+              .withValues(alpha: 0.05);
     final mechanicColor = _colorFor(mechanic.id);
     final totalWidth = dayWidth * days.length;
     final now = DateTime.now();
@@ -798,6 +932,12 @@ class _MechanicRow extends StatelessWidget {
               child: GestureDetector(
                 onTap: () {
                   if (item is ServiceOrder) {
+                    // Alleen eigen bonnen openen; bonnen van collega's
+                    // zijn wel zichtbaar in de planning.
+                    if (!_isEigenBon(item)) {
+                      _toonNietToegewezen(context, item);
+                      return;
+                    }
                     Navigator.of(context).push(
                       CupertinoPageRoute<void>(
                         builder: (_) => BonDetailScreen(order: item),
@@ -807,11 +947,20 @@ class _MechanicRow extends StatelessWidget {
                     showAppointmentDetail(context, item);
                   }
                 },
-                child: _EventChip(
-                  item: item,
-                  color: item is Appointment ? _appointmentColor : mechanicColor,
-                  chipLeft: _leftOffset(item) + 2,
-                  hScroll: hScroll,
+                child: Opacity(
+                  // Bonnen van collega's iets gedimd: zichtbaar, niet te openen.
+                  opacity: item is ServiceOrder && !_isEigenBon(item)
+                      ? 0.55
+                      : 1,
+                  child: _EventChip(
+                    item: item,
+                    rowMechanic: mechanic,
+                    color: item is Appointment
+                        ? _appointmentColor
+                        : mechanicColor,
+                    chipLeft: _leftOffset(item) + 2,
+                    hScroll: hScroll,
+                  ),
                 ),
               ),
             ),
@@ -825,12 +974,17 @@ class _MechanicRow extends StatelessWidget {
 
 class _EventChip extends StatelessWidget {
   final PlanningItem item;
+
+  /// Whose planning row this chip sits in — a bon shared with other
+  /// mechanics names those others ("met …"), not this one.
+  final ServicePerson rowMechanic;
   final Color color;
   final double chipLeft;
   final ScrollController hScroll;
 
   const _EventChip({
     required this.item,
+    required this.rowMechanic,
     required this.color,
     required this.chipLeft,
     required this.hScroll,
@@ -838,73 +992,113 @@ class _EventChip extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final item = this.item;
     final label = item.title;
-    final subtitle = item.subtitle;
     final isAppointment = item is Appointment;
+    final coMechanics = item is ServiceOrder
+        ? item.assignedMechanics.where((m) => m.id != rowMechanic.id).toList()
+        : const <ServicePerson>[];
+    final subtitle = coMechanics.isEmpty
+        ? item.subtitle
+        : [
+            ?item.subtitle,
+            'met ${coMechanics.map((m) => m.name).join(', ')}',
+          ].join(' · ');
 
-    return AnimatedBuilder(
-      animation: hScroll,
-      builder: (context, _) {
-        final scrollOffset = hScroll.hasClients ? hScroll.offset : 0.0;
-        final stickyOffset = (scrollOffset - chipLeft).clamp(
-          0.0,
-          double.infinity,
-        );
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        // Overlapping items split the row into lanes, so a chip can be
+        // much shorter than a lone one. Pick what fits: title + subtitle
+        // (>= 38px), just the title (>= 24px), a slightly smaller title
+        // (>= 17px — a lane at [_laneMinHeight] lands here), or — only if
+        // a row somehow still ends up shorter — a tiny title.
+        final height = constraints.maxHeight;
+        final showSubtitle = subtitle != null && height >= 38;
+        final titleSize = height >= 24
+            ? 13.0
+            : height >= 17
+            ? 12.0
+            : 10.0;
+        final verticalPadding = height >= 24
+            ? 4.0
+            : height >= 17
+            ? 2.0
+            : 0.0;
 
-        return Container(
-          decoration: BoxDecoration(
-            color: color,
-            borderRadius: BorderRadius.circular(4),
-          ),
-          padding: EdgeInsets.only(
-            left: 6 + stickyOffset,
-            right: 6,
-            top: 4,
-            bottom: 4,
-          ),
-          alignment: Alignment.centerLeft,
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Row(
+        return AnimatedBuilder(
+          animation: hScroll,
+          builder: (context, _) {
+            final scrollOffset = hScroll.hasClients ? hScroll.offset : 0.0;
+            // Keeps the text in view while the chip's start is scrolled
+            // off-screen — but never pushes it past the chip's own end.
+            final maxSticky = constraints.maxWidth - 40;
+            final stickyOffset = (scrollOffset - chipLeft).clamp(
+              0.0,
+              maxSticky > 0 ? maxSticky : 0.0,
+            );
+
+            return Container(
+              decoration: BoxDecoration(
+                color: color,
+                borderRadius: BorderRadius.circular(4),
+              ),
+              padding: EdgeInsets.only(
+                left: 6 + stickyOffset,
+                right: 6,
+                top: verticalPadding,
+                bottom: verticalPadding,
+              ),
+              alignment: Alignment.centerLeft,
+              clipBehavior: Clip.hardEdge,
+              child: Column(
                 mainAxisSize: MainAxisSize.min,
+                mainAxisAlignment: MainAxisAlignment.center,
+                crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  if (isAppointment) ...[
-                    const Icon(
-                      CupertinoIcons.calendar,
-                      size: 11,
-                      color: CupertinoColors.white,
-                    ),
-                    const SizedBox(width: 4),
-                  ],
-                  Flexible(
-                    child: Text(
-                      label,
+                  Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      if (isAppointment || coMechanics.isNotEmpty) ...[
+                        Icon(
+                          isAppointment
+                              ? CupertinoIcons.calendar
+                              : CupertinoIcons.person_2_fill,
+                          size: titleSize - 2,
+                          color: CupertinoColors.white,
+                        ),
+                        const SizedBox(width: 4),
+                      ],
+                      Flexible(
+                        child: Text(
+                          label,
+                          style: TextStyle(
+                            fontSize: titleSize,
+                            height: 1.15,
+                            fontWeight: FontWeight.w600,
+                            color: CupertinoColors.white,
+                          ),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                    ],
+                  ),
+                  if (showSubtitle)
+                    Text(
+                      subtitle,
                       style: const TextStyle(
-                        fontSize: 13,
-                        fontWeight: FontWeight.w600,
+                        fontSize: 11,
+                        height: 1.15,
+                        fontWeight: FontWeight.w400,
                         color: CupertinoColors.white,
                       ),
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                     ),
-                  ),
                 ],
               ),
-              if (subtitle != null)
-                Text(
-                  subtitle,
-                  style: const TextStyle(
-                    fontSize: 11,
-                    fontWeight: FontWeight.w400,
-                    color: CupertinoColors.white,
-                  ),
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                ),
-            ],
-          ),
+            );
+          },
         );
       },
     );
@@ -985,10 +1179,10 @@ class _ErrorView extends StatelessWidget {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            const Icon(
+            Icon(
               CupertinoIcons.exclamationmark_circle,
               size: 40,
-              color: CupertinoColors.destructiveRed,
+              color: CupertinoColors.destructiveRed.resolveFrom(context),
             ),
             const SizedBox(height: 12),
             Text(
@@ -1006,4 +1200,34 @@ class _ErrorView extends StatelessWidget {
       ),
     );
   }
+}
+
+/// Is deze bon (ook) aan de ingelogde monteur toegewezen?
+bool _isEigenBon(ServiceOrder order) {
+  final ik = AuthService.instance.currentMechanicId;
+  return ik != null && order.isAssignedTo(ik);
+}
+
+void _toonNietToegewezen(BuildContext context, ServiceOrder order) {
+  final namen = order.assignedMechanics.map((m) => m.name).join(', ');
+  showCupertinoDialog<void>(
+    context: context,
+    barrierDismissible: true,
+    builder: (ctx) => CupertinoAlertDialog(
+      title: Text(order.title),
+      content: Text(
+        namen.isEmpty
+            ? 'Deze bon is niet aan jou toegewezen.'
+            : 'Deze bon is toegewezen aan $namen en kan alleen door '
+                  'hen worden geopend.',
+      ),
+      actions: [
+        CupertinoDialogAction(
+          isDefaultAction: true,
+          onPressed: () => Navigator.of(ctx).pop(),
+          child: const Text('OK'),
+        ),
+      ],
+    ),
+  );
 }

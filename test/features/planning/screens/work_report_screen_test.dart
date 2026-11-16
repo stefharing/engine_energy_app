@@ -81,6 +81,27 @@ Future<void> _fillRequiredTextSections(WidgetTester tester) async {
   await _goBack(tester);
 }
 
+/// Opent het werkrapport als pushed route vanaf een "open"-knop, zodat een
+/// test kan controleren dat het scherm na opslaan sluit.
+Future<void> _openReport(WidgetTester tester) async {
+  await tester.pumpWidget(
+    CupertinoApp(
+      home: Builder(
+        builder: (context) => CupertinoButton(
+          onPressed: () => Navigator.of(context).push(
+            CupertinoPageRoute<void>(
+              builder: (_) => const WorkReportScreen(order: _order),
+            ),
+          ),
+          child: const Text('open'),
+        ),
+      ),
+    ),
+  );
+  await tester.tap(find.text('open'));
+  await tester.pumpAndSettle();
+}
+
 void main() {
   testWidgets('typing into a field debounce-saves it to SharedPreferences', (
     tester,
@@ -190,7 +211,7 @@ void main() {
       expect(find.byKey(const Key('findingField_0')), findsOneWidget);
       await _goBack(tester);
 
-      expect(find.text('0 van 5 onderdelen compleet'), findsOneWidget);
+      expect(find.text('0 van 5 onderdelen ingevuld'), findsOneWidget);
     },
   );
 
@@ -219,17 +240,64 @@ void main() {
       await tester.pump();
       await tester.pump();
 
-      expect(find.text('1 van 5 onderdelen compleet'), findsOneWidget);
+      expect(find.text('1 van 5 onderdelen ingevuld'), findsOneWidget);
 
       await _openRow(tester, "Foto's & documenten");
       expect(find.text('test.pdf'), findsOneWidget);
     },
   );
 
-  testWidgets('Rapport opslaan stays disabled until every section (including '
-      'attachments) is complete, then saves and closes the screen', (
-    tester,
-  ) async {
+  testWidgets(
+    'Rapport opslaan is disabled until something is filled in; a partial '
+    'report asks for confirmation before it saves and closes the screen',
+    (tester) async {
+      SharedPreferences.setMockInitialValues({});
+      await _openReport(tester);
+
+      expect(
+        tester
+            .widget<GestureDetector>(_primaryButton('Rapport opslaan').first)
+            .onTap,
+        isNull,
+      );
+      expect(find.text('Vul minstens één onderdeel in'), findsOneWidget);
+
+      await _openRow(tester, 'Werkomschrijving');
+      await tester.enterText(
+        find.byKey(const Key('workDescriptionField')),
+        'Pomp vervangen',
+      );
+      await tester.pump();
+      await _goBack(tester);
+
+      expect(find.text('1 van 5 onderdelen ingevuld'), findsOneWidget);
+      final saveButton = _primaryButton('Rapport opslaan');
+      expect(tester.widget<GestureDetector>(saveButton.first).onTap, isNotNull);
+
+      // Eerst "Verder invullen": er wordt niets opgeslagen.
+      await tester.tap(saveButton.first);
+      await tester.pumpAndSettle();
+      expect(find.text('Niet alles ingevuld'), findsOneWidget);
+      await tester.tap(find.text('Verder invullen'));
+      await tester.pumpAndSettle();
+      expect(find.text('Rapport opgeslagen'), findsNothing);
+
+      // Daarna "Toch opslaan": opslaan en het scherm sluit.
+      await tester.tap(saveButton.first);
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Toch opslaan'));
+      await tester.pumpAndSettle();
+      expect(find.text('Rapport opgeslagen'), findsOneWidget);
+      await tester.tap(find.text('OK'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Overzicht'), findsNothing);
+      expect(find.text('open'), findsOneWidget);
+    },
+  );
+
+  testWidgets('a complete report saves without a confirmation and closes the '
+      'screen', (tester) async {
     // Seed a document up front so "Foto's & documenten" is already
     // satisfied without depending on the native file/image pickers.
     SharedPreferences.setMockInitialValues({
@@ -245,40 +313,19 @@ void main() {
         'status': 'draft',
       }),
     });
-
-    await tester.pumpWidget(
-      CupertinoApp(
-        home: Builder(
-          builder: (context) => CupertinoButton(
-            onPressed: () => Navigator.of(context).push(
-              CupertinoPageRoute<void>(
-                builder: (_) => const WorkReportScreen(order: _order),
-              ),
-            ),
-            child: const Text('open'),
-          ),
-        ),
-      ),
-    );
-    await tester.tap(find.text('open'));
-    await tester.pumpAndSettle();
-
-    expect(
-      tester
-          .widget<GestureDetector>(_primaryButton('Rapport opslaan').first)
-          .onTap,
-      isNull,
-    );
+    await _openReport(tester);
 
     await _fillRequiredTextSections(tester);
 
-    expect(find.text('5 van 5 onderdelen compleet'), findsOneWidget);
+    expect(find.text('5 van 5 onderdelen ingevuld'), findsOneWidget);
+    expect(find.text('Niet alle onderdelen zijn verplicht'), findsNothing);
     final saveButton = _primaryButton('Rapport opslaan');
     expect(tester.widget<GestureDetector>(saveButton.first).onTap, isNotNull);
 
     await tester.tap(saveButton.first);
     await tester.pumpAndSettle();
 
+    expect(find.text('Niet alles ingevuld'), findsNothing);
     expect(find.text('Rapport opgeslagen'), findsOneWidget);
     await tester.tap(find.text('OK'));
     await tester.pumpAndSettle();

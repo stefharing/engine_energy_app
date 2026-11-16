@@ -14,11 +14,21 @@ import 'package:google_mlkit_text_recognition/google_mlkit_text_recognition.dart
         InputImageRotationValue;
 import 'package:receipt_recognition/receipt_recognition.dart';
 
-class LiveReceiptScanResult {
-  final RecognizedReceipt receipt;
-  final File? imageFile;
+/// Wat de monteur in de scanner koos.
+enum BonScanBron { scan, galerij, handmatig }
 
-  const LiveReceiptScanResult({required this.receipt, this.imageFile});
+class LiveReceiptScanResult {
+  /// Wat live is herkend; `null` bij een foto zonder herkenning, of als de
+  /// monteur voor het fotoarchief of handmatig invullen koos.
+  final RecognizedReceipt? receipt;
+  final File? imageFile;
+  final BonScanBron bron;
+
+  const LiveReceiptScanResult({
+    this.receipt,
+    this.imageFile,
+    this.bron = BonScanBron.scan,
+  });
 }
 
 class LiveReceiptScannerScreen extends StatefulWidget {
@@ -103,6 +113,7 @@ class _LiveReceiptScannerScreenState extends State<LiveReceiptScannerScreen> {
         scanTimeout: const Duration(seconds: 18),
         onScanUpdate: _handleProgress,
         onScanComplete: (receipt) {
+          if (receipt.isEmpty) return;
           unawaited(_finish(receipt));
         },
       );
@@ -206,8 +217,8 @@ class _LiveReceiptScannerScreenState extends State<LiveReceiptScannerScreen> {
     );
   }
 
-  Future<void> _finish(RecognizedReceipt receipt) async {
-    if (_finishing || receipt.isEmpty) return;
+  Future<void> _finish(RecognizedReceipt? receipt) async {
+    if (_finishing) return;
     setState(() => _finishing = true);
 
     File? imageFile;
@@ -229,7 +240,30 @@ class _LiveReceiptScannerScreenState extends State<LiveReceiptScannerScreen> {
     if (!mounted) return;
     Navigator.of(
       context,
-    ).pop(LiveReceiptScanResult(receipt: receipt, imageFile: imageFile));
+    ).pop(
+      LiveReceiptScanResult(
+        receipt: (receipt == null || receipt.isEmpty) ? null : receipt,
+        imageFile: imageFile,
+      ),
+    );
+  }
+
+  void _kies(BonScanBron bron) {
+    if (_finishing) return;
+    unawaited(_stop());
+    Navigator.of(context).pop(LiveReceiptScanResult(bron: bron));
+  }
+
+  Future<void> _flits() async {
+    final c = _controller;
+    if (c == null || !c.value.isInitialized) return;
+    try {
+      final aan = c.value.flashMode == FlashMode.torch;
+      await c.setFlashMode(aan ? FlashMode.off : FlashMode.torch);
+      if (mounted) setState(() {});
+    } catch (_) {
+      // Niet elk toestel heeft een zaklamp.
+    }
   }
 
   Future<void> _stop() async {
@@ -270,36 +304,28 @@ class _LiveReceiptScannerScreenState extends State<LiveReceiptScannerScreen> {
     }
   }
 
-  String get _subtitle {
+  String get _herkend {
     final receipt = _latestReceipt;
-    final total = receipt?.total?.formattedValue;
-    if (total != null) return 'Totaal $total';
-    final count = receipt?.positions.length ?? 0;
-    if (count > 0) return '$count regels herkend';
-    return 'Houd de bon vlak en goed verlicht in beeld';
+    final totaal = receipt?.total?.formattedValue;
+    final datum = receipt?.purchaseDate?.value;
+    if (totaal == null && datum == null) return _statusText;
+    const m = ['jan', 'feb', 'mrt', 'apr', 'mei', 'jun', 'jul', 'aug', 'sep', 'okt', 'nov', 'dec'];
+    return [
+      ?totaal,
+      if (datum != null) '${datum.day} ${m[datum.month - 1]}',
+    ].join(' · ') + ' herkend';
   }
 
   @override
   Widget build(BuildContext context) {
     final controller = _controller;
+    final top = MediaQuery.paddingOf(context).top;
+    final bottom = MediaQuery.paddingOf(context).bottom;
+    final herkend = _canUseScan;
+    final fakkel = controller?.value.flashMode == FlashMode.torch;
 
     return CupertinoPageScaffold(
-      backgroundColor: CupertinoColors.black,
-      navigationBar: CupertinoNavigationBar(
-        backgroundColor: CupertinoColors.black.withValues(alpha: 0.72),
-        border: null,
-        leading: CupertinoNavigationBarBackButton(
-          color: CupertinoColors.white,
-          onPressed: () => Navigator.of(context).pop(),
-        ),
-        middle: const Text(
-          'Bon scannen',
-          style: TextStyle(
-            color: CupertinoColors.white,
-            fontWeight: FontWeight.w600,
-          ),
-        ),
-      ),
+      backgroundColor: const Color(0xFF0B0B0C),
       child: Stack(
         children: [
           Positioned.fill(
@@ -308,28 +334,221 @@ class _LiveReceiptScannerScreenState extends State<LiveReceiptScannerScreen> {
                 : _error != null
                 ? _ErrorState(message: _error!)
                 : controller != null && controller.value.isInitialized
-                ? CameraPreview(controller)
+                ? ClipRect(
+                    child: FittedBox(
+                      fit: BoxFit.cover,
+                      child: SizedBox(
+                        width: controller.value.previewSize?.height ?? 1,
+                        height: controller.value.previewSize?.width ?? 1,
+                        child: CameraPreview(controller),
+                      ),
+                    ),
+                  )
                 : const SizedBox.shrink(),
           ),
           if (_error == null) const _ScanFrame(),
+          // Bovenbalk.
           Positioned(
             left: 16,
             right: 16,
-            bottom: 24 + MediaQuery.paddingOf(context).bottom,
-            child: _BottomPanel(
-              status: _statusText,
-              subtitle: _subtitle,
-              progress: _progress.validationResult.matchPercentage / 100,
-              lineCount: _latestReceipt?.positions.length ?? 0,
-              isFinishing: _finishing,
-              canUseScan: _canUseScan,
-              onUseScan: () {
-                final receipt = _latestReceipt;
-                if (receipt != null) unawaited(_finish(receipt));
-              },
+            top: top + 8,
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                _RondeKnop(
+                  icoon: CupertinoIcons.xmark,
+                  label: 'Sluiten',
+                  onTap: () => Navigator.of(context).pop(),
+                ),
+                const Text(
+                  'Scan bon',
+                  style: TextStyle(
+                    color: CupertinoColors.white,
+                    fontSize: 17,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                _RondeKnop(
+                  icoon: fakkel ? CupertinoIcons.bolt_fill : CupertinoIcons.bolt,
+                  label: 'Flits',
+                  onTap: _flits,
+                ),
+              ],
+            ),
+          ),
+          // Wat er herkend is.
+          Positioned(
+            left: 24,
+            right: 24,
+            top: top + 64,
+            child: Center(
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                decoration: BoxDecoration(
+                  color: CupertinoColors.white,
+                  borderRadius: BorderRadius.circular(22),
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    if (_finishing)
+                      const CupertinoActivityIndicator(radius: 8)
+                    else
+                      Icon(
+                        herkend
+                            ? CupertinoIcons.checkmark_circle
+                            : CupertinoIcons.doc_text_viewfinder,
+                        size: 18,
+                        color: herkend
+                            ? const Color(0xFF248A3D)
+                            : const Color(0xFF6C6C70),
+                      ),
+                    const SizedBox(width: 8),
+                    Flexible(
+                      child: Text(
+                        _finishing ? 'Scan afronden...' : _herkend,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          color: Color(0xFF1C1C1E),
+                          fontSize: 15,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+          const Positioned(
+            left: 0,
+            right: 0,
+            bottom: 190,
+            child: Text(
+              'Houd de bon vlak in het kader',
+              textAlign: TextAlign.center,
+              style: TextStyle(color: Color(0xCCFFFFFF), fontSize: 15),
+            ),
+          ),
+          // Onderbalk: fotoarchief, sluiter, handmatig.
+          Positioned(
+            left: 0,
+            right: 0,
+            bottom: 0,
+            child: Container(
+              color: const Color(0xFF0B0B0C),
+              padding: EdgeInsets.fromLTRB(28, 14, 28, 14 + bottom),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  _OnderKnop(
+                    icoon: CupertinoIcons.photo,
+                    label: 'Fotoarchief',
+                    onTap: () => _kies(BonScanBron.galerij),
+                  ),
+                  Semantics(
+                    button: true,
+                    label: 'Foto maken',
+                    child: GestureDetector(
+                      onTap: _finishing || controller == null
+                          ? null
+                          : () => unawaited(_finish(_latestReceipt)),
+                      child: Container(
+                        width: 78,
+                        height: 78,
+                        padding: const EdgeInsets.all(5),
+                        decoration: BoxDecoration(
+                          shape: BoxShape.circle,
+                          border: Border.all(color: CupertinoColors.white, width: 4),
+                        ),
+                        child: const DecoratedBox(
+                          decoration: BoxDecoration(
+                            shape: BoxShape.circle,
+                            color: Color(0xFFFF6B2B),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                  _OnderKnop(
+                    icoon: CupertinoIcons.pencil,
+                    label: 'Handmatig',
+                    onTap: () => _kies(BonScanBron.handmatig),
+                  ),
+                ],
+              ),
             ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+class _RondeKnop extends StatelessWidget {
+  final IconData icoon;
+  final String label;
+  final VoidCallback onTap;
+
+  const _RondeKnop({
+    required this.icoon,
+    required this.label,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Semantics(
+      button: true,
+      label: label,
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: onTap,
+        child: Container(
+          width: 44,
+          height: 44,
+          decoration: const BoxDecoration(
+            shape: BoxShape.circle,
+            color: Color(0x29FFFFFF),
+          ),
+          child: Icon(icoon, size: 20, color: CupertinoColors.white),
+        ),
+      ),
+    );
+  }
+}
+
+class _OnderKnop extends StatelessWidget {
+  final IconData icoon;
+  final String label;
+  final VoidCallback onTap;
+
+  const _OnderKnop({
+    required this.icoon,
+    required this.label,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: onTap,
+      child: SizedBox(
+        width: 84,
+        height: 64,
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(icoon, size: 26, color: CupertinoColors.white),
+            const SizedBox(height: 6),
+            Text(
+              label,
+              style: const TextStyle(color: CupertinoColors.white, fontSize: 13),
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -340,152 +559,46 @@ class _ScanFrame extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Center(
-      child: Container(
-        width: MediaQuery.sizeOf(context).width * 0.72,
-        height: MediaQuery.sizeOf(context).height * 0.58,
+    const kleur = Color(0xFFFF6B2B);
+    Widget hoek({bool links = true, bool boven = true}) {
+      final zijde = BorderSide(color: kleur, width: 4);
+      return Container(
+        width: 44,
+        height: 44,
         decoration: BoxDecoration(
-          border: Border.all(color: const Color(0xFFFF9500), width: 2),
-          borderRadius: BorderRadius.circular(18),
+          border: Border(
+            left: links ? zijde : BorderSide.none,
+            right: links ? BorderSide.none : zijde,
+            top: boven ? zijde : BorderSide.none,
+            bottom: boven ? BorderSide.none : zijde,
+          ),
+          borderRadius: BorderRadius.only(
+            topLeft: Radius.circular(links && boven ? 14 : 0),
+            topRight: Radius.circular(!links && boven ? 14 : 0),
+            bottomLeft: Radius.circular(links && !boven ? 14 : 0),
+            bottomRight: Radius.circular(!links && !boven ? 14 : 0),
+          ),
         ),
-      ),
-    );
-  }
-}
+      );
+    }
 
-class _BottomPanel extends StatelessWidget {
-  final String status;
-  final String subtitle;
-  final double progress;
-  final int lineCount;
-  final bool isFinishing;
-  final bool canUseScan;
-  final VoidCallback onUseScan;
-
-  const _BottomPanel({
-    required this.status,
-    required this.subtitle,
-    required this.progress,
-    required this.lineCount,
-    required this.isFinishing,
-    required this.canUseScan,
-    required this.onUseScan,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final clamped = progress.clamp(0.0, 1.0);
-
-    return Container(
-      padding: const EdgeInsets.fromLTRB(16, 14, 16, 16),
-      decoration: BoxDecoration(
-        color: const Color(0xFF1C1C1E).withValues(alpha: 0.94),
-        borderRadius: BorderRadius.circular(14),
-        border: Border.all(color: const Color(0xFF38383A)),
-      ),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              Container(
-                width: 34,
-                height: 34,
-                decoration: BoxDecoration(
-                  color: const Color(0xFFFF9500).withValues(alpha: 0.18),
-                  borderRadius: BorderRadius.circular(9),
-                ),
-                child: isFinishing
-                    ? const CupertinoActivityIndicator(radius: 9)
-                    : const Icon(
-                        CupertinoIcons.doc_text_viewfinder,
-                        size: 18,
-                        color: Color(0xFFFF9500),
-                      ),
-              ),
-              const SizedBox(width: 13),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      status,
-                      style: const TextStyle(
-                        color: CupertinoColors.white,
-                        fontSize: 15,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                    const SizedBox(height: 2),
-                    Text(
-                      subtitle,
-                      style: const TextStyle(
-                        color: Color(0xFFB8B8BE),
-                        fontSize: 13,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-              if (lineCount > 0)
-                Container(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 7,
-                    vertical: 3,
-                  ),
-                  decoration: BoxDecoration(
-                    color: const Color(0xFF34C759).withValues(alpha: 0.16),
-                    borderRadius: BorderRadius.circular(9),
-                  ),
-                  child: Text(
-                    '$lineCount',
-                    style: const TextStyle(
-                      color: Color(0xFF34C759),
-                      fontSize: 12,
-                      fontWeight: FontWeight.w700,
-                    ),
-                  ),
-                ),
-            ],
-          ),
-          const SizedBox(height: 12),
-          ClipRRect(
-            borderRadius: BorderRadius.circular(3),
-            child: SizedBox(
-              height: 6,
-              child: Stack(
-                fit: StackFit.expand,
-                children: [
-                  Container(color: const Color(0xFF3A3A3C)),
-                  FractionallySizedBox(
-                    widthFactor: clamped == 0 ? 0.08 : clamped,
-                    alignment: Alignment.centerLeft,
-                    child: Container(color: const Color(0xFFFF9500)),
-                  ),
-                ],
-              ),
+    final size = MediaQuery.sizeOf(context);
+    return Center(
+      child: SizedBox(
+        width: size.width * 0.82,
+        height: size.height * 0.5,
+        child: Stack(
+          children: [
+            Positioned(left: 0, top: 0, child: hoek()),
+            Positioned(right: 0, top: 0, child: hoek(links: false)),
+            Positioned(left: 0, bottom: 0, child: hoek(boven: false)),
+            Positioned(
+              right: 0,
+              bottom: 0,
+              child: hoek(links: false, boven: false),
             ),
-          ),
-          const SizedBox(height: 14),
-          SizedBox(
-            width: double.infinity,
-            child: CupertinoButton(
-              padding: const EdgeInsets.symmetric(vertical: 13),
-              color: const Color(0xFF34C759),
-              disabledColor: const Color(0xFF3A3A3C),
-              borderRadius: BorderRadius.circular(12),
-              onPressed: canUseScan && !isFinishing ? onUseScan : null,
-              child: const Text(
-                'Gebruik scan',
-                style: TextStyle(
-                  color: CupertinoColors.white,
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
-            ),
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }
@@ -504,9 +617,9 @@ class _ErrorState extends StatelessWidget {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            const Icon(
+            Icon(
               CupertinoIcons.exclamationmark_circle,
-              color: CupertinoColors.destructiveRed,
+              color: CupertinoColors.destructiveRed.resolveFrom(context),
               size: 44,
             ),
             const SizedBox(height: 12),

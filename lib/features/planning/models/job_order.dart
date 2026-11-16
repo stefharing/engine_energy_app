@@ -16,7 +16,10 @@ class ServicePerson {
 abstract class PlanningItem {
   DateTime? get planningDate;
   DateTime? get endTime;
-  int? get mechanicId;
+
+  /// Whether this item belongs in [mechanicId]'s planning row — a job order
+  /// can be assigned to several mechanics at once.
+  bool isAssignedTo(int mechanicId);
   String get title;
   String? get subtitle;
 }
@@ -42,7 +45,20 @@ class ServiceOrder implements PlanningItem {
   final DateTime? endTime;
   final DateTime? deliveryDate;
   final String workflowState;
+
+  /// The job order's own `servicemechanic` — the "main" mechanic.
   final ServicePerson? mechanic;
+
+  /// Everyone assigned to this job order: [mechanic] first, plus every
+  /// employee with an appointment on it (see `applyJobOrderAssignments`).
+  /// Falls back to just [mechanic] when that hasn't been loaded.
+  List<ServicePerson> get assignedMechanics =>
+      _assignedMechanics ?? [?mechanic];
+  final List<ServicePerson>? _assignedMechanics;
+
+  /// The `/crm/appointmentactions` ids linked to this job order — used to
+  /// recognise the per-mechanic calendar appointments Ridder creates for it.
+  final Set<int> appointmentActionIds;
   final String serviceObjectTag;
   final String serviceObjectDescription;
   final String serviceType;
@@ -62,6 +78,8 @@ class ServiceOrder implements PlanningItem {
     required this.deliveryDate,
     required this.workflowState,
     required this.mechanic,
+    List<ServicePerson>? assignedMechanics,
+    this.appointmentActionIds = const {},
     required this.serviceObjectTag,
     required this.serviceObjectDescription,
     required this.serviceType,
@@ -70,7 +88,7 @@ class ServiceOrder implements PlanningItem {
     this.serviceContractId,
     this.productionOrderId,
     this.serviceObjectId,
-  });
+  }) : _assignedMechanics = assignedMechanics;
 
   factory ServiceOrder.fromJson(Map<String, dynamic> json) {
     final mechJson = json['servicemechanic'] as Map<String, dynamic>?;
@@ -109,7 +127,11 @@ class ServiceOrder implements PlanningItem {
     );
   }
 
-  ServiceOrder copyWith({String? relationName}) => ServiceOrder(
+  ServiceOrder copyWith({
+    String? relationName,
+    List<ServicePerson>? assignedMechanics,
+    Set<int>? appointmentActionIds,
+  }) => ServiceOrder(
     id: id,
     recordTag: recordTag,
     orderNumber: orderNumber,
@@ -119,6 +141,8 @@ class ServiceOrder implements PlanningItem {
     deliveryDate: deliveryDate,
     workflowState: workflowState,
     mechanic: mechanic,
+    assignedMechanics: assignedMechanics ?? _assignedMechanics,
+    appointmentActionIds: appointmentActionIds ?? this.appointmentActionIds,
     serviceObjectTag: serviceObjectTag,
     serviceObjectDescription: serviceObjectDescription,
     serviceType: serviceType,
@@ -134,7 +158,8 @@ class ServiceOrder implements PlanningItem {
   DateTime? get planningDate => startDate ?? deliveryDate;
 
   @override
-  int? get mechanicId => mechanic?.id;
+  bool isAssignedTo(int mechanicId) =>
+      assignedMechanics.any((m) => m.id == mechanicId);
 
   @override
   String get title => description.isNotEmpty ? description : orderNumber;
@@ -156,6 +181,10 @@ class Appointment implements PlanningItem {
   final String workflowState;
   final bool allDay;
 
+  /// The `/crm/appointmentactions` record this appointment belongs to —
+  /// shared by every mechanic's appointment for the same job order.
+  final int? appointmentActionId;
+
   const Appointment({
     required this.id,
     required this.description,
@@ -164,6 +193,7 @@ class Appointment implements PlanningItem {
     required this.employee,
     required this.workflowState,
     required this.allDay,
+    this.appointmentActionId,
   });
 
   factory Appointment.fromJson(Map<String, dynamic> json) {
@@ -183,6 +213,7 @@ class Appointment implements PlanningItem {
           : null,
       workflowState: stateJson?['state'] as String? ?? '',
       allDay: json['alldayevent'] as bool? ?? false,
+      appointmentActionId: actionJson?['id'] as int?,
     );
   }
 
@@ -193,7 +224,7 @@ class Appointment implements PlanningItem {
   DateTime? get endTime => end;
 
   @override
-  int? get mechanicId => employee?.id;
+  bool isAssignedTo(int mechanicId) => employee?.id == mechanicId;
 
   @override
   String get title => description;

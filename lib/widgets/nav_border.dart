@@ -1,5 +1,7 @@
 import 'package:flutter/cupertino.dart';
 
+import '../core/theme/app_colors.dart';
+
 /// A hairline separator to place at the top of a screen body,
 /// giving the navigation bar a permanent bottom border.
 class NavBorder extends StatelessWidget {
@@ -7,10 +9,9 @@ class NavBorder extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final isDark = CupertinoTheme.brightnessOf(context) == Brightness.dark;
     return Container(
       height: 0.5,
-      color: isDark ? const Color(0xFF38383A) : const Color(0xFFD1D1D6),
+      color: AppColors.separator.resolveFrom(context),
     );
   }
 }

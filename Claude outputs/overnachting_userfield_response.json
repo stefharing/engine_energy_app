@@ -1,0 +1,40 @@
+{
+  "_toelichting": "Deel 1 is de ECHTE response van GET /Engine Energy B.V./RIQ_80167_3/v1/ServiceRemote/UserField?page=1 (testomgeving, 5 okt 2026). Deel 2 is een GEEN echte response: er staat op dit moment op geen enkele testbon een waarde, dus de exacte sleutel/waarde in userFields is nog niet bevestigd.",
+
+  "1_echte_response_GET_ServiceRemote_UserField": [
+    {
+      "id": 1,
+      "dateChanged": "2026-10-05T11:52:40.61+00:00",
+      "description": "Standaard",
+      "sortIndex": 0,
+      "fields": [
+        {
+          "id": 1,
+          "dateChanged": "2026-10-05T11:52:40.61+00:00",
+          "description": "Overnachting",
+          "sortIndex": 0,
+          "showInJobOrder": false,
+          "required": false,
+          "dataType": 4,
+          "size": 1,
+          "group": 1,
+          "translations": [],
+          "columnName": "OVERNACHTING"
+        }
+      ],
+      "translations": [
+        { "language": 1, "value": "Standaard" }
+      ]
+    }
+  ],
+
+  "2_verwachte_vorm_op_de_bon_NIET_BEVESTIGD": {
+    "_endpoint": "GET/POST /ServiceRemote/JobOrder/{id}",
+    "_schema": "ServiceRemoteJobOrder.userFields = ServiceRemoteJobOrderUserFields (type object, additionalProperties: true, nullable)",
+    "id": 63,
+    "jobOrderNumber": "200048.1",
+    "userFields": {
+      "OVERNACHTING": true
+    }
+  }
+}

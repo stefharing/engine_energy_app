@@ -1,24 +1,40 @@
 import 'dart:async';
-import 'dart:convert';
 import 'dart:typed_data';
+import 'dart:ui' show FontFeature;
 
+import 'package:dio/dio.dart' show DioException;
 import 'package:flutter/cupertino.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../../../core/api/api_client.dart';
+import '../../../core/auth/employee.dart';
+import '../../../core/auth/employee_repository.dart';
+import '../data/job_order_service.dart';
+import '../data/extras_draft_service.dart';
 import '../data/hours_draft_service.dart';
+import '../data/hours_sync_service.dart';
+import '../data/map_snapshot_service.dart';
+import '../data/picking_sync_service.dart';
 import '../data/planning_repository.dart';
 import '../data/signature_draft_service.dart';
+import '../data/visit_report_service.dart';
+import '../models/work_report_draft.dart';
 import '../models/job_order.dart';
 import '../models/service_interval.dart';
-import 'declarations_screen.dart';
+import '../models/signature_capture.dart';
+import '../../declaraties/data/declaratie_service.dart';
+import '../../declaraties/screens/declaraties_screen.dart';
 import 'used_materials_screen.dart';
+import 'service_object_documents_screen.dart';
+import 'service_object_history_screen.dart';
 import 'hours_week_screen.dart';
 import 'parts_list_screen.dart';
-import 'signature_pad_screen.dart';
 import 'work_completion_screen.dart' show WorkCompletionScreen, bonCompletedKey;
+import 'visit_report_pdf_screen.dart';
+import 'visit_report_screen.dart';
 import 'work_report_screen.dart';
+import '../../../core/theme/app_colors.dart';
 
 // ─── Screen ────────────────────────────────────────────────────────────────────
 
@@ -53,6 +69,7 @@ class _BonDetailScreenState extends State<BonDetailScreen> {
   bool _partsConfirmed = false;
 
   Map<String, dynamic>? _address;
+  MapSnapshot? _kaart;
   String? _contactName;
   String? _contactPhone;
 
@@ -64,10 +81,19 @@ class _BonDetailScreenState extends State<BonDetailScreen> {
   String? _bannerText;
   Timer? _bannerTimer;
 
-  Uint8List? _signatureBytes;
+  SignatureCapture? _signature;
   bool _isCompleted = false;
 
+  /// Status van het werkrapport uit "Rapport schrijven" (null = nog niets).
+  WorkReportStatus? _rapportStatus;
+
   ServiceOrder get _order => widget.order;
+
+  /// Monteurs op deze bon, bijgewerkt nadat er een monteur is toegevoegd.
+  List<ServicePerson>? _monteursNaToevoegen;
+  List<ServicePerson> get _monteurs =>
+      _monteursNaToevoegen ?? _order.assignedMechanics;
+  bool _monteurBezig = false;
   int get _aantalOpenPick =>
       _parts.where((p) => !_takenIds.contains(p['id'].toString())).length;
 
@@ -75,13 +101,21 @@ class _BonDetailScreenState extends State<BonDetailScreen> {
   /// every card entered via "Uren & km".
   double _totalUrenGeregistreerd = 0;
 
+  /// Kilometers entered via "Uren & km" (see [HoursDraftService]).
+  int _totalKm = 0;
+
+  /// Declaraties op deze bon, en hoeveel daarvan nog op verzenden wachten.
+  int _declaratieCount = 0;
+  int _declaratieWacht = 0;
+
   @override
   void initState() {
     super.initState();
     _load();
-    // Toon navbar-titel zodra de grote titel voorbij scrolt (~20px padding + ~33px tekst)
+    _loadDeclaraties();
+    // Toon navbar-titel zodra de titel in de hero voorbij scrolt
     _scrollCtrl.addListener(() {
-      final show = _scrollCtrl.offset > 53;
+      final show = _scrollCtrl.offset > 110;
       if (show != _showNavTitle) setState(() => _showNavTitle = show);
     });
   }
@@ -106,6 +140,7 @@ class _BonDetailScreenState extends State<BonDetailScreen> {
         _loadHours(),
         _loadSignature(),
         _loadCompleted(),
+        _loadRapportStatus(),
       ]);
     } catch (e) {
       if (mounted) setState(() => _error = e.toString());
@@ -132,6 +167,7 @@ class _BonDetailScreenState extends State<BonDetailScreen> {
     final all = (resp.data['data'] as List).cast<Map<String, dynamic>>();
     final parts = all.where((e) => e['joborderdetailitem'] != null).toList();
 
+    await PickingSyncService.instance.haalOp(_order.id);
     final prefs = await SharedPreferences.getInstance();
     final taken = <String>{};
     for (final p in parts) {
@@ -139,11 +175,14 @@ class _BonDetailScreenState extends State<BonDetailScreen> {
         taken.add(p['id'].toString());
       }
     }
-    // Same key UsedMaterialsScreen and PartsListScreen persist extras
-    // under — this used to read a different, never-written key, so the
-    // "Extra materiaal" task always showed a count of 0.
-    final extrasRaw = prefs.getString('extra_scanned_${_order.id}') ?? '[]';
-    final extrasCount = (jsonDecode(extrasRaw) as List).length;
+    // Zelfde bron als UsedMaterialsScreen en PartsListScreen (gedeeld via
+    // Firestore, of lokaal als Firebase niet beschikbaar is).
+    var extrasCount = _extraCount;
+    try {
+      extrasCount = (await ExtrasDraftService.instance.load(_order.id)).length;
+    } catch (_) {
+      // Geen verbinding en niets in de cache: toon de vorige telling.
+    }
     final confirmed = prefs.getBool('parts_confirmed_${_order.id}') ?? false;
 
     if (mounted)
@@ -156,13 +195,48 @@ class _BonDetailScreenState extends State<BonDetailScreen> {
   }
 
   Future<void> _loadHours() async {
+    await HoursSyncService.instance.haalOp(_order.id);
     final total = await HoursDraftService.instance.localTotalHours(_order.id);
-    if (mounted) setState(() => _totalUrenGeregistreerd = total);
+    final km = await HoursDraftService.instance.localTotalKm(_order.id);
+    if (mounted) {
+      setState(() {
+        _totalUrenGeregistreerd = total;
+        _totalKm = km;
+      });
+    }
+  }
+
+  Future<void> _loadDeclaraties() async {
+    final lijst = (await DeclaratieService.instance.laad())
+        .where((d) => d.bonId == _order.id)
+        .toList();
+    if (mounted) {
+      setState(() {
+        _declaratieCount = lijst.length;
+        _declaratieWacht = lijst.where((d) => !d.isVerstuurd).length;
+      });
+    }
+  }
+
+  Future<void> _openDeclaraties() async {
+    await Navigator.of(context).push<void>(
+      CupertinoPageRoute<void>(
+        builder: (_) => DeclaratiesScreen(order: _order),
+      ),
+    );
+    if (mounted) _loadDeclaraties();
   }
 
   Future<void> _loadSignature() async {
-    final bytes = await SignatureDraftService.instance.load(_order.id);
-    if (mounted) setState(() => _signatureBytes = bytes);
+    final sig = await SignatureDraftService.instance.load(_order.id);
+    if (mounted) setState(() => _signature = sig);
+  }
+
+  Future<void> _loadRapportStatus() async {
+    final rapport = await VisitReportService.instance.laadWerkrapport(
+      _order.id,
+    );
+    if (mounted) setState(() => _rapportStatus = rapport?.status);
   }
 
   Future<void> _loadCompleted() async {
@@ -172,6 +246,26 @@ class _BonDetailScreenState extends State<BonDetailScreen> {
   }
 
   Future<void> _loadAddress() async {
+    try {
+      await _loadAddressRidder();
+    } finally {
+      unawaited(_loadKaart());
+    }
+  }
+
+  Future<void> _loadKaart() async {
+    if (!mounted) return;
+    final donker = CupertinoTheme.brightnessOf(context) == Brightness.dark;
+    final adres = _address != null ? _fmtAddr(_address!) : _order.location;
+    final land = _address?['country']?.toString() ?? '';
+    final snap = await MapSnapshotService.instance.laad(
+      land.isNotEmpty ? '$adres, $land' : adres,
+      donker: donker,
+    );
+    if (snap != null && mounted) setState(() => _kaart = snap);
+  }
+
+  Future<void> _loadAddressRidder() async {
     final id = _order.serviceObjectId;
     if (id == null) return;
     final obj = await PlanningRepository.instance.fetchServiceObject(id);
@@ -217,11 +311,6 @@ class _BonDetailScreenState extends State<BonDetailScreen> {
     });
   }
 
-  String _fmtDate(DateTime? d) {
-    if (d == null) return '—';
-    return '${d.day} ${_months[d.month]} ${d.year}';
-  }
-
   String _fmtAddr(Map<String, dynamic> a) {
     final line1 = '${a['street'] ?? ''} ${a['housenumber'] ?? ''}'.trim();
     final line2 = '${a['zipcode'] ?? ''} ${a['city'] ?? ''}'.trim();
@@ -231,13 +320,30 @@ class _BonDetailScreenState extends State<BonDetailScreen> {
   Future<void> _openMaps() async {
     final addr = _address != null ? _fmtAddr(_address!) : _order.location;
     final q = Uri.encodeComponent(addr);
+    final k = _kaart;
+    final ll = k != null ? '${k.lat},${k.lon}' : null;
     final opts = <(String, Uri)>[];
     if (await canLaunchUrl(Uri.parse('maps://')))
-      opts.add(('Apple Maps', Uri.parse('maps://?q=$q')));
+      opts.add((
+        'Apple Maps',
+        Uri.parse(ll != null ? 'maps://?q=$q&ll=$ll' : 'maps://?q=$q'),
+      ));
     if (await canLaunchUrl(Uri.parse('comgooglemaps://')))
-      opts.add(('Google Maps', Uri.parse('comgooglemaps://?q=$q')));
+      opts.add((
+        'Google Maps',
+        Uri.parse(
+          ll != null
+              ? 'comgooglemaps://?q=$ll'
+              : 'comgooglemaps://?q=$q',
+        ),
+      ));
     if (await canLaunchUrl(Uri.parse('waze://')))
-      opts.add(('Waze', Uri.parse('waze://?q=$q')));
+      opts.add((
+        'Waze',
+        Uri.parse(
+          ll != null ? 'waze://?ll=$ll&navigate=yes' : 'waze://?q=$q',
+        ),
+      ));
     if (opts.length == 1) {
       await launchUrl(opts.first.$2);
       return;
@@ -296,17 +402,150 @@ class _BonDetailScreenState extends State<BonDetailScreen> {
     if (saved == true && mounted) _showBanner('Uren opgeslagen');
   }
 
+  /// Opent het bezoekrapport: de klant bekijkt het overzicht en tekent
+  /// onderaan (met naam en e-mailadres).
   Future<void> _openSignaturePad() async {
-    final bytes = await Navigator.of(context).push<Uint8List>(
-      CupertinoPageRoute<Uint8List>(
-        builder: (_) => SignaturePadScreen(initialSignature: _signatureBytes),
+    // Na afronden: het getekende rapport bekijken (zoals gepubliceerd).
+    if (_isCompleted) {
+      final pdf =
+          await VisitReportService.instance.laadDefinitievePdf(_order.id) ??
+          await VisitReportService.instance.maakPdfVoorBon(_order);
+      if (!mounted) return;
+      await Navigator.of(context).push(
+        CupertinoPageRoute<void>(
+          builder: (_) => VisitReportPdfScreen(
+            pdf: pdf,
+            bestandsnaam:
+                'Bezoekrapport_${_order.orderNumber.replaceAll(RegExp(r'[^\w-]'), '_')}.pdf',
+            titel: 'Getekend bezoekrapport',
+          ),
+        ),
+      );
+      return;
+    }
+    final getekend = await Navigator.of(context).push<bool>(
+      CupertinoPageRoute<bool>(
+        builder: (_) =>
+            VisitReportScreen(order: _order, contactName: _contactName),
       ),
     );
-    if (bytes == null || !mounted) return;
-    await SignatureDraftService.instance.save(_order.id, bytes);
     if (!mounted) return;
-    setState(() => _signatureBytes = bytes);
-    _showBanner('Handtekening opgeslagen');
+    final sig = await SignatureDraftService.instance.load(_order.id);
+    if (!mounted) return;
+    setState(() => _signature = sig);
+    if (getekend == true && sig != null) _showBanner('Bezoekrapport getekend');
+  }
+
+  /// Laat de monteur een collega kiezen en zet die op de bon (Ridder:
+  /// `employees[]` van de bon, zie [JobOrderService.addEmployee]).
+  Future<void> _voegMonteurToe() async {
+    if (_monteurBezig) return;
+    setState(() => _monteurBezig = true);
+    try {
+      final alles = await EmployeeRepository.instance.fetchFieldEngineers();
+      if (!mounted) return;
+      final opBon = _monteurs.map((m) => m.id).toSet();
+      final keuzes = alles.where((e) => !opBon.contains(e.id)).toList();
+      if (keuzes.isEmpty) {
+        await _meldingDialoog(
+          'Geen monteurs beschikbaar',
+          'Alle monteurs staan al op deze bon.',
+        );
+        return;
+      }
+      final gekozen = await showCupertinoModalPopup<Employee>(
+        context: context,
+        builder: (ctx) => CupertinoActionSheet(
+          title: const Text('Monteur toevoegen'),
+          message: const Text('Kies een collega die ook op deze bon werkt.'),
+          actions: [
+            for (final e in keuzes)
+              CupertinoActionSheetAction(
+                onPressed: () => Navigator.of(ctx).pop(e),
+                child: Text(e.name),
+              ),
+          ],
+          cancelButton: CupertinoActionSheetAction(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: const Text('Annuleren'),
+          ),
+        ),
+      );
+      if (gekozen == null || !mounted) return;
+
+      final actieId = _order.appointmentActionIds.firstOrNull;
+      if (actieId == null) {
+        await _meldingDialoog(
+          'Kan niet toevoegen',
+          'Deze bon heeft nog geen planningsafspraak in Ridder. '
+              'Vraag kantoor om de bon in te plannen.',
+        );
+        return;
+      }
+      await JobOrderService.instance.addEmployee(
+        appointmentActionId: actieId,
+        employeeId: gekozen.id,
+      );
+      if (!mounted) return;
+      setState(() {
+        _monteursNaToevoegen = [
+          ..._monteurs,
+          ServicePerson(id: gekozen.id, name: gekozen.name),
+        ];
+      });
+      _showBanner('${gekozen.name} toegevoegd');
+    } on MonteurAlOpBon {
+      if (!mounted) return;
+      await _meldingDialoog(
+        'Staat al op de bon',
+        'Deze monteur is al aan de bon toegevoegd.',
+      );
+    } on GeenAfspraakOpBon {
+      if (!mounted) return;
+      await _meldingDialoog(
+        'Kan niet toevoegen',
+        'Deze bon heeft nog geen planningsafspraak in Ridder. '
+            'Vraag kantoor om de bon in te plannen.',
+      );
+    } catch (e, st) {
+      debugPrint('[monteur toevoegen] mislukt: $e\n$st');
+      if (!mounted) return;
+      await _meldingDialoog('Toevoegen mislukt', _foutTekst(e));
+    } finally {
+      if (mounted) setState(() => _monteurBezig = false);
+    }
+  }
+
+  /// Leesbare foutmelding met de technische reden erbij, zodat een mislukte
+  /// aanroep (status + antwoord van Ridder) te herleiden is.
+  String _foutTekst(Object e) {
+    if (e is DioException) {
+      final status = e.response?.statusCode;
+      var body = '${e.response?.data ?? e.error ?? e.message ?? ''}';
+      if (body.length > 300) body = '${body.substring(0, 300)}…';
+      if (status == null) {
+        return 'Geen verbinding met de server. Probeer het opnieuw.\n\n'
+            '${e.type.name}';
+      }
+      return 'Ridder gaf een fout terug (status $status).\n\n$body';
+    }
+    return 'Er ging iets mis: $e';
+  }
+
+  Future<void> _meldingDialoog(String titel, String tekst) {
+    return showCupertinoDialog<void>(
+      context: context,
+      builder: (ctx) => CupertinoAlertDialog(
+        title: Text(titel),
+        content: Text(tekst),
+        actions: [
+          CupertinoDialogAction(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: const Text('Ok'),
+          ),
+        ],
+      ),
+    );
   }
 
   void _showBanner(String text) {
@@ -325,7 +564,8 @@ class _BonDetailScreenState extends State<BonDetailScreen> {
         builder: (_) => WorkCompletionScreen(
           order: _order,
           totalUrenGeregistreerd: _totalUrenGeregistreerd,
-          signatureBytes: _signatureBytes,
+          signature: _signature,
+          contactName: _contactName,
         ),
       ),
     );
@@ -358,27 +598,23 @@ class _BonDetailScreenState extends State<BonDetailScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final isDark = CupertinoTheme.brightnessOf(context) == Brightness.dark;
-    final cardBg = isDark
-        ? const Color(0xFF1C1C1E)
-        : CupertinoColors.systemBackground;
-    final border = isDark ? const Color(0xFF38383A) : const Color(0xFFE5E5EA);
     final order = _order;
     final title = order.description.isNotEmpty
         ? order.description
         : order.orderNumber;
-    final subtitle = [
-      order.serviceObjectTag,
-      order.location,
-    ].where((s) => s.isNotEmpty).join('  ·  ');
     return CupertinoPageScaffold(
-      backgroundColor: isDark ? CupertinoColors.black : const Color(0xFFF2F2F7),
+      backgroundColor: AppColors.page,
       navigationBar: CupertinoNavigationBar(
-        backgroundColor: CupertinoColors.white,
+        // De donkere hero loopt door tot achter de navbar.
+        backgroundColor: _heroBg,
+        // Standaard maakt Cupertino de navbar transparant zolang er nog
+        // niets onder scrolt; hier moet hij altijd donker zijn.
+        automaticBackgroundVisibility: false,
         border: null,
-        padding: const EdgeInsetsDirectional.only(start: 4),
+        padding: const EdgeInsetsDirectional.only(start: 4, end: 16),
         leading: CupertinoNavigationBarBackButton(
-          color: CupertinoColors.black,
+          color: CupertinoColors.white,
+          previousPageTitle: 'Terug',
           onPressed: () => Navigator.of(context).pop(),
         ),
         middle: AnimatedOpacity(
@@ -386,19 +622,58 @@ class _BonDetailScreenState extends State<BonDetailScreen> {
           duration: const Duration(milliseconds: 150),
           child: Text(
             title,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
             style: const TextStyle(
               fontWeight: FontWeight.w600,
-              color: CupertinoColors.black,
+              color: CupertinoColors.white,
             ),
           ),
         ),
+        trailing: order.orderNumber.isNotEmpty
+            ? Text(
+                'Bon ${order.orderNumber}',
+                style: const TextStyle(
+                  fontSize: 13,
+                  color: _heroMuted,
+                  fontFeatures: [FontFeature.tabularFigures()],
+                ),
+              )
+            : null,
       ),
       child: Stack(
         children: [
           CustomScrollView(
             controller: _scrollCtrl,
             slivers: [
-              CupertinoSliverRefreshControl(onRefresh: _onRefresh),
+              // Het ruimtevak dat tijdens trekken en verversen verschijnt is
+              // donker, zodat het naadloos in de hero overgaat.
+              CupertinoSliverRefreshControl(
+                onRefresh: _onRefresh,
+                builder:
+                    (
+                      context,
+                      refreshState,
+                      pulledExtent,
+                      refreshTriggerPullDistance,
+                      refreshIndicatorExtent,
+                    ) => ColoredBox(
+                      color: _heroBg,
+                      child: CupertinoTheme(
+                        data: const CupertinoThemeData(
+                          brightness: Brightness.dark,
+                        ),
+                        child: CupertinoSliverRefreshControl
+                            .buildRefreshIndicator(
+                          context,
+                          refreshState,
+                          pulledExtent,
+                          refreshTriggerPullDistance,
+                          refreshIndicatorExtent,
+                        ),
+                      ),
+                    ),
+              ),
               if (_loading)
                 const SliverFillRemaining(
                   child: Center(child: CupertinoActivityIndicator()),
@@ -408,60 +683,12 @@ class _BonDetailScreenState extends State<BonDetailScreen> {
                   child: _ErrorView(error: _error!, onRetry: _load),
                 )
               else ...[
-                // ── Titel + info blok (witte achtergrond) ────────────────
+                // ── Hero (donker) ────────────────────────────────────────
                 SliverToBoxAdapter(
-                  child: Container(
-                    color: isDark
-                        ? const Color(0xFF1C1C1E)
-                        : CupertinoColors.systemBackground,
-                    padding: const EdgeInsets.fromLTRB(16, 20, 16, 20),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          title,
-                          style: const TextStyle(
-                            fontSize: 28,
-                            fontWeight: FontWeight.w700,
-                          ),
-                        ),
-                        const SizedBox(height: 4),
-                        if (order.orderNumber.isNotEmpty)
-                          Text(
-                            'Bon ${order.orderNumber}',
-                            style: TextStyle(
-                              fontSize: 15,
-                              color: CupertinoColors.secondaryLabel.resolveFrom(
-                                context,
-                              ),
-                            ),
-                          ),
-                        if (subtitle.isNotEmpty) ...[
-                          const SizedBox(height: 2),
-                          Text(
-                            subtitle,
-                            style: TextStyle(
-                              fontSize: 15,
-                              color: CupertinoColors.secondaryLabel.resolveFrom(
-                                context,
-                              ),
-                            ),
-                          ),
-                        ],
-                        const SizedBox(height: 12),
-                        Row(
-                          children: [
-                            _StatusBadge(state: order.workflowState),
-                            const SizedBox(width: 10),
-                            _DatePill(
-                              startDate: order.startDate,
-                              endDate: order.endTime,
-                              fmtDate: _fmtDate,
-                            ),
-                          ],
-                        ),
-                      ],
-                    ),
+                  child: _BonHero(
+                    order: order,
+                    title: title,
+                    months: _months,
                   ),
                 ),
 
@@ -493,8 +720,11 @@ class _BonDetailScreenState extends State<BonDetailScreen> {
                       aantalOpenPick: _aantalOpenPick,
                       partsConfirmed: _partsConfirmed,
                       extraCount: _extraCount,
+                      declaratieCount: _declaratieCount,
+                      declaratieWacht: _declaratieWacht,
                       totalUrenGeregistreerd: _totalUrenGeregistreerd,
-                      hasSignature: _signatureBytes != null,
+                      totalKm: _totalKm,
+                      hasSignature: _signature != null,
                       isCompleted: _isCompleted,
                       onPick: () => _push(
                         PartsListScreen(order: order),
@@ -505,9 +735,16 @@ class _BonDetailScreenState extends State<BonDetailScreen> {
                         UsedMaterialsScreen(order: order),
                         refreshParts: true,
                       ),
-                      onDeclaraties: () =>
-                          _push(DeclarationsScreen(order: order)),
-                      onRapport: () => _push(WorkReportScreen(order: order)),
+                      onDeclaraties: _openDeclaraties,
+                      rapportStatus: _rapportStatus,
+                      onRapport: () async {
+                        await Navigator.of(context).push<void>(
+                          CupertinoPageRoute<void>(
+                            builder: (_) => WorkReportScreen(order: order),
+                          ),
+                        );
+                        if (mounted) _loadRapportStatus();
+                      },
                       onTekenen: _openSignaturePad,
                       onWerkAfronden: _openWorkCompletion,
                     ),
@@ -519,29 +756,11 @@ class _BonDetailScreenState extends State<BonDetailScreen> {
                 // ── Klus ──────────────────────────────────────────────────
                 SliverToBoxAdapter(child: _SectionLabel('Klus')),
                 SliverToBoxAdapter(
-                  child: _InfoCard(
-                    bg: cardBg,
-                    border: border,
-                    children: [
-                      if (order.mechanic != null)
-                        _InfoRow(
-                          icon: CupertinoIcons.person,
-                          label: 'Monteur',
-                          value: order.mechanic!.name,
-                        ),
-                      if (order.serviceType.isNotEmpty)
-                        _InfoRow(
-                          icon: CupertinoIcons.wrench,
-                          label: 'Type service',
-                          value: order.serviceType,
-                        ),
-                      if (order.orderNumber.isNotEmpty)
-                        _InfoRow(
-                          icon: CupertinoIcons.doc_text,
-                          label: 'Ordernummer',
-                          value: order.orderNumber,
-                        ),
-                    ],
+                  child: _KlusTegels(
+                    order: order,
+                    monteurs: _monteurs,
+                    bezig: _monteurBezig,
+                    onToevoegen: _voegMonteurToe,
                   ),
                 ),
 
@@ -552,8 +771,6 @@ class _BonDetailScreenState extends State<BonDetailScreen> {
                   SliverToBoxAdapter(
                     child: _ObjectSection(
                       order: order,
-                      cardBg: cardBg,
-                      border: border,
                       onShowComingSoon: _showComingSoon,
                     ),
                   ),
@@ -564,26 +781,14 @@ class _BonDetailScreenState extends State<BonDetailScreen> {
                   const SliverToBoxAdapter(child: SizedBox(height: 20)),
                   SliverToBoxAdapter(child: _SectionLabel('Adres & contact')),
                   SliverToBoxAdapter(
-                    child: _InfoCard(
-                      bg: cardBg,
-                      border: border,
-                      children: [
-                        _NavRow(
-                          icon: CupertinoIcons.map_pin_ellipse,
-                          label: order.location,
-                          subtitle: _address != null
-                              ? _fmtAddr(_address!)
-                              : null,
-                          onTap: _openMaps,
-                        ),
-                        if (_contactName != null || _contactPhone != null)
-                          _NavRow(
-                            icon: CupertinoIcons.phone,
-                            label: _contactName ?? _contactPhone!,
-                            subtitle: _contactPhone,
-                            onTap: _callContact,
-                          ),
-                      ],
+                    child: _AdresKaart(
+                      locationName: order.location,
+                      address: _address != null ? _fmtAddr(_address!) : null,
+                      contactName: _contactName,
+                      contactPhone: _contactPhone,
+                      kaart: _kaart,
+                      onMaps: _openMaps,
+                      onCall: _callContact,
                     ),
                   ),
                 ],
@@ -591,16 +796,6 @@ class _BonDetailScreenState extends State<BonDetailScreen> {
                 const SliverToBoxAdapter(child: SizedBox(height: 48)),
               ],
             ],
-          ),
-          // Vaste hairline onder de navbar, onafhankelijk van scroll
-          Positioned(
-            top: 0,
-            left: 0,
-            right: 0,
-            height: 0.5,
-            child: Container(
-              color: isDark ? const Color(0xFF38383A) : const Color(0xFFD1D1D6),
-            ),
           ),
           // Banner die kort verschijnt na het opslaan van uren of handtekening
           AnimatedPositioned(
@@ -660,106 +855,6 @@ class _SavedBanner extends StatelessWidget {
               color: CupertinoColors.white,
             ),
           ),
-        ],
-      ),
-    );
-  }
-}
-
-// ─── Status badge ──────────────────────────────────────────────────────────────
-
-class _StatusBadge extends StatelessWidget {
-  final String state;
-  const _StatusBadge({required this.state});
-
-  Color _color() {
-    final s = state.toLowerCase();
-    if (s.contains('nieuw') || s.contains('new'))
-      return const Color(0xFF64B5F6);
-    if (s.contains('uitvoering') || s.contains('progress'))
-      return const Color(0xFFFFCC02);
-    if (s.contains('gereed') || s.contains('done') || s.contains('klaar'))
-      return const Color(0xFF4CD964);
-    if (s.contains('gepland') || s.contains('planned'))
-      return const Color(0xFFCFB0F5);
-    return const Color(0xFFCCCCCC);
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final c = _color();
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-      decoration: BoxDecoration(
-        color: c.withValues(alpha: 0.18),
-        borderRadius: BorderRadius.circular(20),
-      ),
-      child: Text(
-        state,
-        style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: c),
-      ),
-    );
-  }
-}
-
-// ─── Date pill ─────────────────────────────────────────────────────────────────
-
-class _DatePill extends StatelessWidget {
-  final DateTime? startDate;
-  final DateTime? endDate;
-  final String Function(DateTime?) fmtDate;
-
-  const _DatePill({
-    required this.startDate,
-    required this.endDate,
-    required this.fmtDate,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final isDark = CupertinoTheme.brightnessOf(context) == Brightness.dark;
-    final bg = isDark ? const Color(0xFF2C2C2E) : const Color(0xFFE5E5EA);
-    final textColor = isDark
-        ? CupertinoColors.label.resolveFrom(context)
-        : const Color(0xFF3A3A3C);
-
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-      decoration: BoxDecoration(
-        color: bg,
-        borderRadius: BorderRadius.circular(20),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(CupertinoIcons.calendar, size: 12, color: textColor),
-          const SizedBox(width: 5),
-          Text(
-            fmtDate(startDate),
-            style: TextStyle(
-              fontSize: 12,
-              fontWeight: FontWeight.w600,
-              color: textColor,
-            ),
-          ),
-          if (endDate != null) ...[
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 5),
-              child: Icon(
-                CupertinoIcons.arrow_right,
-                size: 9,
-                color: CupertinoColors.tertiaryLabel.resolveFrom(context),
-              ),
-            ),
-            Text(
-              fmtDate(endDate),
-              style: TextStyle(
-                fontSize: 12,
-                fontWeight: FontWeight.w600,
-                color: textColor,
-              ),
-            ),
-          ],
         ],
       ),
     );
@@ -832,14 +927,26 @@ class _WarningCard extends StatelessWidget {
 String _fmtUren(double v) =>
     v == v.truncateToDouble() ? v.toInt().toString() : v.toStringAsFixed(1);
 
+/// "Uren & km" subtitle, e.g. "6u · 120 km geregistreerd".
+String _urenKmSubtitle(double uren, int km) {
+  final parts = [if (uren > 0) '${_fmtUren(uren)}u', if (km > 0) '$km km'];
+  return parts.isEmpty
+      ? 'Nog niets geregistreerd'
+      : '${parts.join(' · ')} geregistreerd';
+}
+
 /// Builds the seven [_TaskItem]s shown in [_TaskGrid].
 List<_TaskItem> _buildTaskItems({
   required int aantalOpenPick,
   required bool partsConfirmed,
   required int extraCount,
+  required int declaratieCount,
+  required int declaratieWacht,
   required double totalUrenGeregistreerd,
+  required int totalKm,
   required bool hasSignature,
   required bool isCompleted,
+  required WorkReportStatus? rapportStatus,
   required VoidCallback onPick,
   required VoidCallback onUren,
   required VoidCallback onExtra,
@@ -868,9 +975,7 @@ List<_TaskItem> _buildTaskItems({
     icon: CupertinoIcons.timer,
     iconColor: const Color(0xFF34C759),
     title: 'Uren & km',
-    subtitle: totalUrenGeregistreerd > 0
-        ? '${_fmtUren(totalUrenGeregistreerd)}u geregistreerd'
-        : 'Nog niets geregistreerd',
+    subtitle: _urenKmSubtitle(totalUrenGeregistreerd, totalKm),
     done: totalUrenGeregistreerd > 0,
     locked: false,
     onTap: onUren,
@@ -888,38 +993,47 @@ List<_TaskItem> _buildTaskItems({
     onTap: onExtra,
   ),
   _TaskItem(
-    iconBg: const Color(0xFFE8EBF5),
+    iconBg: const Color(0xFFE0F6F9),
     icon: CupertinoIcons.doc_text,
-    iconColor: const Color(0xFF2C3E6B),
+    iconColor: const Color(0xFF30B0C7),
     title: 'Kosten & bonnen',
-    subtitle: 'Nog niet beschikbaar',
-    done: false,
-    locked: true,
-    onTap: null,
+    subtitle: declaratieCount == 0
+        ? 'Bonnetjes toevoegen'
+        : '$declaratieCount ${declaratieCount == 1 ? 'declaratie' : 'declaraties'}'
+              '${declaratieWacht > 0 ? ' · $declaratieWacht wacht op verzenden' : ''}',
+    done: declaratieCount > 0 && declaratieWacht == 0,
+    locked: false,
+    onTap: onDeclaraties,
   ),
   _TaskItem(
     iconBg: const Color(0xFFEDE8F5),
     icon: CupertinoIcons.pencil_outline,
     iconColor: const Color(0xFF5856D6),
     title: 'Rapport schrijven',
-    subtitle: 'Nog niet beschikbaar',
-    done: false,
-    locked: true,
-    onTap: null,
+    subtitle: rapportStatus == WorkReportStatus.saved
+        ? 'Rapport opgeslagen'
+        : rapportStatus == WorkReportStatus.draft
+        ? 'Concept – nog niet afgerond'
+        : 'Werkzaamheden en bevindingen noteren',
+    done: rapportStatus == WorkReportStatus.saved,
+    locked: false,
+    onTap: onRapport,
   ),
   _TaskItem(
     iconBg: const Color(0xFFE6F9EC),
     icon: CupertinoIcons.signature,
     iconColor: const Color(0xFF34C759),
-    title: 'Klant laten tekenen',
-    subtitle: hasSignature
-        ? 'Handtekening vastgelegd'
+    title: 'Bezoekrapport tekenen',
+    subtitle: isCompleted
+        ? 'Getekend rapport bekijken'
+        : hasSignature
+        ? 'Getekend door de klant'
         : totalUrenGeregistreerd > 0
-        ? 'Tik om handtekening te verzamelen'
+        ? 'Rapport doornemen en laten tekenen'
         : 'Beschikbaar zodra uren zijn ingevuld',
-    done: hasSignature,
-    locked: totalUrenGeregistreerd == 0,
-    onTap: totalUrenGeregistreerd > 0 ? onTekenen : null,
+    done: hasSignature || isCompleted,
+    locked: !isCompleted && totalUrenGeregistreerd == 0,
+    onTap: isCompleted || totalUrenGeregistreerd > 0 ? onTekenen : null,
   ),
   _TaskItem(
     iconBg: const Color(0xFFFFE9DE),
@@ -943,8 +1057,12 @@ class _TaskGrid extends StatelessWidget {
   final int aantalOpenPick;
   final bool partsConfirmed;
   final int extraCount;
+  final int declaratieCount;
+  final int declaratieWacht;
   final double totalUrenGeregistreerd;
+  final int totalKm;
   final bool hasSignature;
+  final WorkReportStatus? rapportStatus;
   final bool isCompleted;
   final VoidCallback onPick;
   final VoidCallback onUren;
@@ -958,8 +1076,12 @@ class _TaskGrid extends StatelessWidget {
     required this.aantalOpenPick,
     required this.partsConfirmed,
     required this.extraCount,
+    required this.declaratieCount,
+    required this.declaratieWacht,
     required this.totalUrenGeregistreerd,
+    required this.totalKm,
     required this.hasSignature,
+    this.rapportStatus,
     required this.isCompleted,
     required this.onPick,
     required this.onUren,
@@ -982,8 +1104,12 @@ class _TaskGrid extends StatelessWidget {
       aantalOpenPick: aantalOpenPick,
       partsConfirmed: partsConfirmed,
       extraCount: extraCount,
+      declaratieCount: declaratieCount,
+      declaratieWacht: declaratieWacht,
       totalUrenGeregistreerd: totalUrenGeregistreerd,
+      totalKm: totalKm,
       hasSignature: hasSignature,
+      rapportStatus: rapportStatus,
       isCompleted: isCompleted,
       onPick: onPick,
       onUren: onUren,
@@ -1052,7 +1178,13 @@ class _TaskItem extends StatelessWidget {
             width: 34,
             height: 34,
             decoration: BoxDecoration(
-              color: locked ? lockedIconBg : iconBg,
+              // The pastel [iconBg]s are light-mode only; on a dark card
+              // they'd glow, so dark mode tints with [iconColor] instead.
+              color: locked
+                  ? lockedIconBg
+                  : isDark
+                  ? iconColor.withValues(alpha: 0.2)
+                  : iconBg,
               borderRadius: BorderRadius.circular(9),
             ),
             child: Icon(
@@ -1160,173 +1292,6 @@ class _TaskItem extends StatelessWidget {
   }
 }
 
-// ─── Info card ─────────────────────────────────────────────────────────────────
-
-class _InfoCard extends StatelessWidget {
-  final Color bg;
-  final Color border;
-  final List<Widget> children;
-
-  const _InfoCard({
-    required this.bg,
-    required this.border,
-    required this.children,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    if (children.isEmpty) return const SizedBox.shrink();
-    return Container(
-      margin: const EdgeInsets.symmetric(horizontal: 16),
-      decoration: BoxDecoration(
-        color: bg,
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: border),
-      ),
-      child: Column(
-        children: [
-          for (int i = 0; i < children.length; i++) ...[
-            children[i],
-            if (i < children.length - 1)
-              Padding(
-                padding: const EdgeInsets.only(left: 52),
-                child: Container(height: 0.5, color: border),
-              ),
-          ],
-        ],
-      ),
-    );
-  }
-}
-
-// ─── Info row ──────────────────────────────────────────────────────────────────
-
-class _InfoRow extends StatelessWidget {
-  final IconData icon;
-  final String label;
-  final String value;
-
-  const _InfoRow({
-    required this.icon,
-    required this.label,
-    required this.value,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 13),
-      child: Row(
-        children: [
-          Icon(
-            icon,
-            size: 18,
-            color: CupertinoColors.secondaryLabel.resolveFrom(context),
-          ),
-          const SizedBox(width: 14),
-          SizedBox(
-            width: 110,
-            child: Text(
-              label,
-              style: TextStyle(
-                fontSize: 15,
-                color: CupertinoColors.secondaryLabel.resolveFrom(context),
-              ),
-            ),
-          ),
-          Expanded(
-            child: Text(
-              value,
-              textAlign: TextAlign.end,
-              style: TextStyle(
-                fontSize: 15,
-                color: CupertinoColors.label.resolveFrom(context),
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-// ─── Nav row ───────────────────────────────────────────────────────────────────
-
-class _NavRow extends StatelessWidget {
-  final IconData icon;
-  final String label;
-  final String? subtitle;
-  final VoidCallback onTap;
-
-  const _NavRow({
-    required this.icon,
-    required this.label,
-    required this.onTap,
-    this.subtitle,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return GestureDetector(
-      onTap: onTap,
-      behavior: HitTestBehavior.opaque,
-      child: Padding(
-        padding: EdgeInsets.symmetric(
-          horizontal: 20,
-          vertical: subtitle != null ? 14 : 13,
-        ),
-        child: Row(
-          children: [
-            Icon(
-              icon,
-              size: 18,
-              color: CupertinoColors.secondaryLabel.resolveFrom(context),
-            ),
-            const SizedBox(width: 14),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    label,
-                    style: TextStyle(
-                      fontSize: 15,
-                      fontWeight: subtitle != null
-                          ? FontWeight.w500
-                          : FontWeight.w400,
-                      color: CupertinoColors.label.resolveFrom(context),
-                    ),
-                  ),
-                  if (subtitle != null) ...[
-                    const SizedBox(height: 3),
-                    Text(
-                      subtitle!,
-                      style: TextStyle(
-                        fontSize: 13,
-                        color: CupertinoColors.secondaryLabel.resolveFrom(
-                          context,
-                        ),
-                      ),
-                      maxLines: 2,
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                  ],
-                ],
-              ),
-            ),
-            const SizedBox(width: 8),
-            Icon(
-              CupertinoIcons.chevron_right,
-              size: 14,
-              color: CupertinoColors.tertiaryLabel.resolveFrom(context),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
 // ─── Object section ──────────────────────────────────────────────────────────
 
 /// The "Object" card on the bon detail screen — the service object (e.g. a
@@ -1340,14 +1305,10 @@ class _NavRow extends StatelessWidget {
 /// section's own initial paint either.
 class _ObjectSection extends StatefulWidget {
   final ServiceOrder order;
-  final Color cardBg;
-  final Color border;
   final ValueChanged<String> onShowComingSoon;
 
   const _ObjectSection({
     required this.order,
-    required this.cardBg,
-    required this.border,
     required this.onShowComingSoon,
   });
 
@@ -1418,111 +1379,1324 @@ class _ObjectSectionState extends State<_ObjectSection> {
     return '${d.day} ${_months[d.month]} ${d.year}';
   }
 
+  /// Tekst uit een Ridder-veld; leeg (null, "" of alleen spaties) → null.
+  static String? _tekst(dynamic v) {
+    final t = v?.toString().trim() ?? '';
+    return t.isEmpty ? null : t;
+  }
+
+  /// Haalt HTML/RTF-opmaak uit een memo.
+  static String? _schoneMemo(dynamic v) {
+    var t = v?.toString() ?? '';
+    if (t.trim().startsWith('{\\rtf')) {
+      t = t
+          .replaceAll(RegExp(r'\\par[d]?\b'), '\n')
+          .replaceAll(RegExp(r"\\'[0-9a-fA-F]{2}"), '')
+          .replaceAll(RegExp(r'\\[a-zA-Z]+-?\d* ?'), '')
+          .replaceAll(RegExp(r'[{}]'), '');
+    }
+    t = t
+        .replaceAll(RegExp(r'<br\s*/?>|</p>', caseSensitive: false), '\n')
+        .replaceAll(RegExp(r'<[^>]*>'), '')
+        .replaceAll('&nbsp;', ' ')
+        .replaceAll('&amp;', '&')
+        .replaceAll('&lt;', '<')
+        .replaceAll('&gt;', '>')
+        .replaceAll(RegExp(r'\n{3,}'), '\n\n')
+        .trim();
+    return t.isEmpty ? null : t;
+  }
+
+  Widget _pill(String text, Color bg, Color fg) => Container(
+    padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 3),
+    decoration: BoxDecoration(
+      color: bg,
+      borderRadius: BorderRadius.circular(20),
+    ),
+    child: Text(
+      text,
+      style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: fg),
+    ),
+  );
+
+  Widget _scheiding(BuildContext context, double inspringing) => Container(
+    height: 0.5,
+    margin: EdgeInsets.only(left: inspringing),
+    color: AppColors.border.resolveFrom(context),
+  );
+
+  /// Rij met het label boven de waarde.
+  Widget _rijLabelBoven(
+    BuildContext context, {
+    required IconData icon,
+    required String label,
+    required InlineSpan waarde,
+    VoidCallback? onTap,
+  }) {
+    final secundair = CupertinoColors.secondaryLabel.resolveFrom(context);
+    return GestureDetector(
+      onTap: onTap,
+      behavior: HitTestBehavior.opaque,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+        child: Row(
+          children: [
+            SizedBox(
+              width: 18,
+              child: Icon(icon, size: 18, color: secundair),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(label, style: TextStyle(fontSize: 12, color: secundair)),
+                  const SizedBox(height: 1),
+                  Text.rich(
+                    waarde,
+                    style: TextStyle(
+                      fontSize: 15,
+                      color: CupertinoColors.label.resolveFrom(context),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            if (onTap != null)
+              Icon(
+                CupertinoIcons.chevron_right,
+                size: 14,
+                color: CupertinoColors.tertiaryLabel.resolveFrom(context),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// Rij met het label links en de waarde rechts.
+  Widget _rijWaardeRechts(
+    BuildContext context, {
+    required IconData icon,
+    Color? iconKleur,
+    required String label,
+    required String waarde,
+    Color? waardeKleur,
+  }) {
+    final secundair = CupertinoColors.secondaryLabel.resolveFrom(context);
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+      child: Row(
+        children: [
+          SizedBox(
+            width: 18,
+            child: Icon(icon, size: 18, color: iconKleur ?? secundair),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Text(
+              label,
+              style: TextStyle(fontSize: 15, color: secundair),
+            ),
+          ),
+          const SizedBox(width: 12),
+          Flexible(
+            child: Text(
+              waarde,
+              textAlign: TextAlign.right,
+              style: TextStyle(
+                fontSize: 15,
+                color: waardeKleur ?? CupertinoColors.label.resolveFrom(context),
+                fontFeatures: const [FontFeature.tabularFigures()],
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final order = widget.order;
     final detail = _detail;
-    final title = order.serviceObjectDescription.isNotEmpty
+    final isDark = CupertinoTheme.brightnessOf(context) == Brightness.dark;
+    final navy = AppColors.navy.resolveFrom(context);
+    final secundair = CupertinoColors.secondaryLabel.resolveFrom(context);
+    final label = CupertinoColors.label.resolveFrom(context);
+
+    // ── Kop ────────────────────────────────────────────────────────────────
+    final fallbackTitel = order.serviceObjectDescription.isNotEmpty
         ? order.serviceObjectDescription
         : order.serviceObjectTag;
-
-    final objectNumber = detail?['objectnumber']?.toString() ?? '';
-    final serialNumber = detail?['serialnumber']?.toString() ?? '';
+    final title =
+        _tekst(detail?['description']) ??
+        _tekst(detail?['recordtag']) ??
+        fallbackTitel;
     final subtitle = [
-      if (objectNumber.isNotEmpty) 'Objectnr. $objectNumber',
-      if (serialNumber.isNotEmpty) 'Serienr. $serialNumber',
-    ].join(' · ');
+      _tekst(detail?['attribute01']),
+      _tekst(detail?['objectnumber']),
+    ].whereType<String>().join(' · ');
 
-    final objectLocationJson =
-        detail?['objectlocation'] as Map<String, dynamic>?;
-    final objectLocationName =
-        objectLocationJson?['name'] as String? ??
-        objectLocationJson?['code'] as String? ??
-        '';
-    final showLocation =
-        objectLocationName.trim().isNotEmpty &&
-        objectLocationName.trim().toLowerCase() !=
-            order.location.trim().toLowerCase();
+    final typeTekst = _tekst(
+      (detail?['serviceobjecttype'] as Map<String, dynamic>?)?['description'],
+    );
+    final statusTekst = _tekst(
+      (detail?['workflowstate'] as Map<String, dynamic>?)?['state'],
+    );
+    final actief =
+        statusTekst != null &&
+        statusTekst.toLowerCase().contains('actief') &&
+        !statusTekst.toLowerCase().contains('inactief');
+    final geblokkeerd = detail?['isblocked'] == true;
 
-    final warrantyDate = parseServiceApiDate(detail?['ourwarrantydate']);
-    final nextMaintenance = _intervals != null
-        ? nextMaintenanceDateFrom(_intervals!)
-        : null;
+    const groenTekst = Color(0xFF248A3D);
+    const rood = Color(0xFFD70015);
+    final pills = <Widget>[
+      if (typeTekst != null)
+        _pill(
+          typeTekst,
+          isDark ? navy.withValues(alpha: 0.2) : const Color(0xFFE8EBF5),
+          isDark ? navy : const Color(0xFF2C3E6B),
+        ),
+      if (statusTekst != null)
+        actief
+            ? _pill(
+                statusTekst,
+                isDark
+                    ? const Color(0xFF34C759).withValues(alpha: 0.2)
+                    : const Color(0xFFE6F9EC),
+                isDark ? const Color(0xFF34C759) : groenTekst,
+              )
+            : _pill(statusTekst, AppColors.field.resolveFrom(context), secundair),
+      if (geblokkeerd)
+        _pill(
+          'Geblokkeerd',
+          isDark
+              ? const Color(0xFFFF453A).withValues(alpha: 0.2)
+              : const Color(0xFFFFE5E5),
+          isDark ? const Color(0xFFFF453A) : rood,
+        ),
+    ];
 
-    return _InfoCard(
-      bg: widget.cardBg,
-      border: widget.border,
-      children: [
-        Padding(
-          padding: const EdgeInsets.fromLTRB(20, 14, 20, 14),
-          child: Row(
+    // ── Rijen (elke rij verdwijnt als het veld leeg is) ────────────────────
+    final rijen = <Widget>[];
+
+    final hoofd = detail?['mainserviceobject'] as Map<String, dynamic>?;
+    final hoofdNaam =
+        _tekst(hoofd?['description']) ?? _tekst(hoofd?['recordtag']);
+    if (hoofdNaam != null) {
+      final hoofdNr = _tekst(hoofd?['recordtag']);
+      rijen.add(
+        _rijLabelBoven(
+          context,
+          icon: CupertinoIcons.link,
+          label: 'Onderdeel van',
+          waarde: TextSpan(
             children: [
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      title,
-                      style: TextStyle(
-                        fontSize: 16,
-                        fontWeight: FontWeight.w600,
-                        color: CupertinoColors.label.resolveFrom(context),
-                      ),
-                    ),
-                    if (subtitle.isNotEmpty) ...[
-                      const SizedBox(height: 3),
-                      Text(
-                        subtitle,
-                        style: TextStyle(
-                          fontSize: 13,
-                          color: CupertinoColors.secondaryLabel.resolveFrom(
-                            context,
-                          ),
-                        ),
-                      ),
-                    ],
-                  ],
+              TextSpan(text: hoofdNaam),
+              if (hoofdNr != null && hoofdNr != hoofdNaam)
+                TextSpan(
+                  text: ' ($hoofdNr)',
+                  style: TextStyle(color: secundair),
                 ),
-              ),
-              if (_detailLoading) ...[
-                const SizedBox(width: 10),
-                const CupertinoActivityIndicator(radius: 8),
-              ],
             ],
           ),
+          onTap: () => widget.onShowComingSoon('Hoofdobject'),
         ),
-        if (showLocation)
-          _InfoRow(
-            icon: CupertinoIcons.location,
-            label: 'Locatie',
-            value: objectLocationName,
-          ),
-        if (warrantyDate != null)
-          _InfoRow(
-            icon: CupertinoIcons.shield,
-            label: 'Garantie',
-            value: 'tot ${_fmtDate(warrantyDate)}',
-          ),
-        if (nextMaintenance != null)
-          _InfoRow(
-            icon: CupertinoIcons.wrench_fill,
-            label: 'Volgend onderhoud',
-            value: _fmtDate(nextMaintenance),
-          ),
-        if (_documentCount != null)
-          _NavRow(
-            icon: CupertinoIcons.doc_on_doc,
-            label: _documentCount == 1
-                ? '1 document'
-                : '$_documentCount documenten',
-            onTap: () => widget.onShowComingSoon('Documenten'),
-          ),
-        _NavRow(
-          icon: CupertinoIcons.clock,
-          label: 'Bekijk servicehistorie',
-          onTap: () => widget.onShowComingSoon('Servicehistorie'),
+      );
+    }
+
+    final objectRel = detail?['objectrelation'] as Map<String, dynamic>?;
+    final objectRelNaam =
+        _tekst(objectRel?['name']) ?? _tekst(objectRel?['recordtag']);
+    if (objectRelNaam != null) {
+      rijen.add(
+        _rijLabelBoven(
+          context,
+          icon: CupertinoIcons.building_2_fill,
+          label: 'Eigenaar',
+          waarde: TextSpan(text: objectRelNaam),
         ),
-      ],
+      );
+    }
+
+    final orderRel = detail?['orderrelation'] as Map<String, dynamic>?;
+    final orderRelNaam =
+        _tekst(orderRel?['name']) ?? _tekst(orderRel?['recordtag']);
+    if (orderRelNaam != null &&
+        orderRel?['id']?.toString() != objectRel?['id']?.toString()) {
+      rijen.add(
+        _rijLabelBoven(
+          context,
+          icon: CupertinoIcons.building_2_fill,
+          label: 'Orderrelatie',
+          waarde: TextSpan(text: orderRelNaam),
+        ),
+      );
+    }
+
+    final serienummer = _tekst(detail?['serialnumber']);
+    if (serienummer != null) {
+      rijen.add(
+        _rijWaardeRechts(
+          context,
+          icon: CupertinoIcons.number,
+          label: 'Serienummer',
+          waarde: serienummer,
+        ),
+      );
+    }
+    final geleverd = parseServiceApiDate(detail?['deliverydate']);
+    if (geleverd != null) {
+      rijen.add(
+        _rijWaardeRechts(
+          context,
+          icon: CupertinoIcons.cube_box,
+          label: 'Geleverd',
+          waarde: _fmtDate(geleverd),
+        ),
+      );
+    }
+    final inGebruik = parseServiceApiDate(detail?['commissioningdate']);
+    if (inGebruik != null) {
+      rijen.add(
+        _rijWaardeRechts(
+          context,
+          icon: CupertinoIcons.power,
+          label: 'In gebruik',
+          waarde: _fmtDate(inGebruik),
+        ),
+      );
+    }
+    final garantie =
+        parseServiceApiDate(detail?['ourwarrantydate']) ??
+        parseServiceApiDate(detail?['supplierwarrantydate']);
+    if (garantie != null) {
+      final verlopen = garantie.isBefore(DateTime.now());
+      rijen.add(
+        _rijWaardeRechts(
+          context,
+          icon: CupertinoIcons.checkmark_shield,
+          iconKleur: verlopen ? secundair : const Color(0xFF34C759),
+          label: 'Garantie',
+          waarde: '${verlopen ? 'verlopen' : 'tot'} ${_fmtDate(garantie)}',
+        ),
+      );
+    }
+    final volgendOnderhoud = _intervals != null
+        ? nextMaintenanceDateFrom(_intervals!)
+        : null;
+    if (volgendOnderhoud != null) {
+      rijen.add(
+        _rijWaardeRechts(
+          context,
+          icon: CupertinoIcons.wrench,
+          label: 'Volgend onderhoud',
+          waarde: _fmtDate(volgendOnderhoud),
+        ),
+      );
+    }
+
+    final memo = _schoneMemo(detail?['memo']);
+
+    return Container(
+      margin: const EdgeInsets.symmetric(horizontal: 16),
+      clipBehavior: Clip.antiAlias,
+      decoration: _kaartDecoratie(context, 16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          // Kop
+          Padding(
+            padding: const EdgeInsets.all(14),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Container(
+                  width: 44,
+                  height: 44,
+                  decoration: BoxDecoration(
+                    color: isDark
+                        ? navy.withValues(alpha: 0.2)
+                        : const Color(0xFFE8EBF5),
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: Icon(CupertinoIcons.gear_alt, size: 22, color: navy),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        title,
+                        style: TextStyle(
+                          fontSize: 16,
+                          fontWeight: FontWeight.w600,
+                          color: label,
+                        ),
+                      ),
+                      if (subtitle.isNotEmpty) ...[
+                        const SizedBox(height: 2),
+                        Text(
+                          subtitle,
+                          style: TextStyle(fontSize: 13, color: secundair),
+                        ),
+                      ],
+                      if (pills.isNotEmpty) ...[
+                        const SizedBox(height: 8),
+                        Wrap(spacing: 6, runSpacing: 6, children: pills),
+                      ],
+                    ],
+                  ),
+                ),
+                if (_detailLoading) ...[
+                  const SizedBox(width: 10),
+                  const CupertinoActivityIndicator(radius: 8),
+                ],
+              ],
+            ),
+          ),
+          for (var i = 0; i < rijen.length; i++) ...[
+            _scheiding(context, i == 0 ? 14 : 44),
+            rijen[i],
+          ],
+          if (memo != null)
+            Container(
+              margin: const EdgeInsets.fromLTRB(14, 0, 14, 12),
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+              decoration: BoxDecoration(
+                color: isDark
+                    ? const Color(0xFFFF9500).withValues(alpha: 0.2)
+                    : const Color(0xFFFFF4E0),
+                borderRadius: BorderRadius.circular(12),
+              ),
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Padding(
+                    padding: EdgeInsets.only(top: 2),
+                    child: Icon(
+                      CupertinoIcons.doc_text,
+                      size: 16,
+                      color: Color(0xFFFF9500),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      memo,
+                      style: TextStyle(
+                        fontSize: 14,
+                        height: 1.4,
+                        color: isDark ? label : const Color(0xFF5C3B00),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(14, 0, 14, 14),
+            child: Row(
+              children: [
+                Expanded(
+                  child: _VlakKnop(
+                    icon: CupertinoIcons.doc_on_doc,
+                    label: _documentCount == null
+                        ? 'Documenten'
+                        : _documentCount == 1
+                        ? '1 document'
+                        : '$_documentCount documenten',
+                    onTap: () => Navigator.of(context).push(
+                      CupertinoPageRoute<void>(
+                        builder: (_) => ServiceObjectDocumentsScreen(
+                          serviceObjectId: widget.order.serviceObjectId!,
+                          objectTitel: title,
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: _VlakKnop(
+                    icon: CupertinoIcons.clock,
+                    label: 'Historie',
+                    onTap: () => Navigator.of(context).push(
+                      CupertinoPageRoute<void>(
+                        builder: (_) => ServiceObjectHistoryScreen(
+                          serviceObjectId: widget.order.serviceObjectId!,
+                          objectTitel: title,
+                          huidigeBonId: widget.order.id,
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// ─── Hero ──────────────────────────────────────────────────────────────────────
+
+const _heroBg = Color(0xFF1C1C1E);
+
+/// rgba(235,235,245,.6) — secundaire tekst op de donkere hero.
+const _heroMuted = Color(0x99EBEBF5);
+
+/// Kleur van een werkstroomstatus (Gepland, Nieuw, Uitvoering, Gereed).
+Color _statusColor(String state) {
+  final s = state.toLowerCase();
+  if (s.contains('nieuw') || s.contains('new')) return const Color(0xFF64B5F6);
+  if (s.contains('uitvoering') || s.contains('progress')) {
+    return const Color(0xFFFFCC02);
+  }
+  if (s.contains('gereed') || s.contains('done') || s.contains('klaar')) {
+    return const Color(0xFF4CD964);
+  }
+  if (s.contains('gepland') || s.contains('planned')) {
+    return const Color(0xFFCFB0F5);
+  }
+  return const Color(0xFFCCCCCC);
+}
+
+String _hhmm(DateTime d) =>
+    '${d.hour.toString().padLeft(2, '0')}:${d.minute.toString().padLeft(2, '0')}';
+
+/// De donkere kop van het bon detail scherm: status, titel, datumblok en
+/// voortgang van de taken.
+class _BonHero extends StatelessWidget {
+  final ServiceOrder order;
+  final String title;
+  final List<String> months;
+
+  const _BonHero({
+    required this.order,
+    required this.title,
+    required this.months,
+  });
+
+  Widget _pill(String text, Color bg, Color fg) => Container(
+    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+    decoration: BoxDecoration(
+      color: bg,
+      borderRadius: BorderRadius.circular(20),
+    ),
+    child: Text(
+      text,
+      style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: fg),
+    ),
+  );
+
+  static const _dagen = ['ma', 'di', 'wo', 'do', 'vr', 'za', 'zo'];
+
+  static DateTime _dag(DateTime d) => DateTime(d.year, d.month, d.day);
+
+  /// Aantal kalenderdagen tussen twee datums (DST-veilig).
+  static int _dagenTussen(DateTime van, DateTime tot) =>
+      DateTime.utc(tot.year, tot.month, tot.day)
+          .difference(DateTime.utc(van.year, van.month, van.day))
+          .inDays;
+
+  /// De datumregel van de hero: het bereik ("di 14 – do 16 okt") in wit en
+  /// een grijs deel erachter ("· 3 dagen · dag 2").
+  ({String bereik, String grijs}) _fmtRange() {
+    final start = order.startDate;
+    if (start == null) return (bereik: '', grijs: 'Geen datum gepland');
+
+    String kort(DateTime d, {bool jaar = false}) =>
+        '${_dagen[d.weekday - 1]} ${d.day} ${months[d.month]}'
+        '${jaar ? ' ${d.year}' : ''}';
+
+    final van = _dag(start);
+    var tot = order.endTime != null ? _dag(order.endTime!) : van;
+    if (tot.isBefore(van)) tot = van;
+
+    // Tijden alleen als ze er echt zijn (00:00 betekent: geen tijd bekend).
+    String? tijd;
+    if (start.hour != 0 || start.minute != 0) {
+      final end = order.endTime;
+      tijd = end == null || (end.hour == 0 && end.minute == 0)
+          ? _hhmm(start)
+          : '${_hhmm(start)} – ${_hhmm(end)}';
+    }
+
+    if (tot == van) {
+      return (bereik: kort(van), grijs: tijd == null ? '' : ' · $tijd');
+    }
+
+    final String bereik;
+    if (van.year != tot.year) {
+      bereik = '${kort(van, jaar: true)} – ${kort(tot, jaar: true)}';
+    } else if (van.month != tot.month) {
+      bereik = '${kort(van)} – ${kort(tot)}';
+    } else {
+      bereik =
+          '${_dagen[van.weekday - 1]} ${van.day} – '
+          '${_dagen[tot.weekday - 1]} ${tot.day} ${months[tot.month]}';
+    }
+
+    final aantal = _dagenTussen(van, tot) + 1;
+    final vandaag = _dag(DateTime.now());
+    var grijs = ' · $aantal dagen';
+    if (!vandaag.isBefore(van) && !vandaag.isAfter(tot)) {
+      grijs += ' · dag ${_dagenTussen(van, vandaag) + 1}';
+    } else if (vandaag.isBefore(van)) {
+      final x = _dagenTussen(vandaag, van);
+      grijs += ' · over $x ${x == 1 ? 'dag' : 'dagen'}';
+    }
+    return (bereik: bereik, grijs: grijs);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final status = order.workflowState;
+    final statusKleur = _statusColor(status);
+    final subtitle = [
+      order.serviceObjectDescription.isNotEmpty
+          ? order.serviceObjectDescription
+          : order.serviceObjectTag,
+      order.location,
+    ].where((s) => s.isNotEmpty).join(' · ');
+    final datum = _fmtRange();
+
+    return Container(
+      width: double.infinity,
+      color: _heroBg,
+      padding: const EdgeInsets.fromLTRB(20, 8, 20, 22),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              if (status.isNotEmpty)
+                _pill(status, statusKleur.withValues(alpha: 0.2), statusKleur),
+              if (order.serviceType.isNotEmpty)
+                _pill(
+                  order.serviceType,
+                  const Color(0x1AFFFFFF),
+                  const Color(0xD9EBEBF5),
+                ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          Text(
+            title,
+            style: const TextStyle(
+              fontSize: 30,
+              fontWeight: FontWeight.w700,
+              height: 1.1,
+              letterSpacing: -0.5,
+              color: CupertinoColors.white,
+            ),
+          ),
+          if (subtitle.isNotEmpty) ...[
+            const SizedBox(height: 6),
+            Text(
+              subtitle,
+              style: const TextStyle(fontSize: 15, color: _heroMuted),
+            ),
+          ],
+          const SizedBox(height: 16),
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Padding(
+                padding: EdgeInsets.only(top: 1),
+                child: Icon(
+                  CupertinoIcons.calendar,
+                  size: 16,
+                  color: AppColors.accent,
+                ),
+              ),
+              const SizedBox(width: 8),
+              // Breekt op smalle schermen af in plaats van af te kappen.
+              Expanded(
+                child: Text.rich(
+                  TextSpan(
+                    children: [
+                      if (datum.bereik.isNotEmpty)
+                        TextSpan(
+                          text: datum.bereik,
+                          style: const TextStyle(
+                            fontWeight: FontWeight.w600,
+                            color: CupertinoColors.white,
+                          ),
+                        ),
+                      TextSpan(
+                        text: datum.grijs,
+                        style: const TextStyle(color: _heroMuted),
+                      ),
+                    ],
+                  ),
+                  style: const TextStyle(fontSize: 15),
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// ─── Klus ──────────────────────────────────────────────────────────────────────
+
+/// Eerste letter van de eerste en de laatste naamdelen ("Wim Boekestijn" → WB).
+String _initialen(String naam) {
+  final delen = naam.trim().split(RegExp(r'\s+')).where((d) => d.isNotEmpty);
+  if (delen.isEmpty) return '?';
+  final eerste = delen.first[0];
+  final laatste = delen.length > 1 ? delen.last[0] : '';
+  return (eerste + laatste).toUpperCase();
+}
+
+/// Pastelkleurparen (achtergrond, tekst) voor avatars.
+const _avatarKleuren = [
+  (Color(0xFFFFE9DE), Color(0xFFFF6B2B)),
+  (Color(0xFFE3F0FF), Color(0xFF007AFF)),
+  (Color(0xFFE6F9EC), Color(0xFF248A3D)),
+  (Color(0xFFEDE8F5), Color(0xFF5856D6)),
+];
+
+/// Ronde avatar met initialen. In dark mode wordt de accentkleur op 20%
+/// gebruikt in plaats van de pastelkleur.
+class _Avatar extends StatelessWidget {
+  final String tekst;
+  final Color bg;
+  final Color fg;
+  final double size;
+  final double fontSize;
+  final Color? ring;
+
+  const _Avatar({
+    required this.tekst,
+    required this.bg,
+    required this.fg,
+    this.size = 32,
+    this.fontSize = 12,
+    this.ring,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final isDark = CupertinoTheme.brightnessOf(context) == Brightness.dark;
+    return Container(
+      width: size,
+      height: size,
+      alignment: Alignment.center,
+      decoration: BoxDecoration(
+        shape: BoxShape.circle,
+        color: isDark ? fg.withValues(alpha: 0.2) : bg,
+        border: ring == null ? null : Border.all(color: ring!, width: 2),
+      ),
+      child: Text(
+        tekst,
+        style: TextStyle(
+          fontSize: fontSize,
+          fontWeight: FontWeight.w700,
+          color: fg,
+        ),
+      ),
+    );
+  }
+}
+
+/// Witte kaart met rand, voor tegels en de object-/adreskaart.
+BoxDecoration _kaartDecoratie(BuildContext context, double radius) =>
+    BoxDecoration(
+      color: AppColors.card.resolveFrom(context),
+      borderRadius: BorderRadius.circular(radius),
+      border: Border.all(color: AppColors.border.resolveFrom(context)),
+    );
+
+class _Tegel extends StatelessWidget {
+  final String label;
+  final String value;
+  final bool cijfers;
+
+  const _Tegel({required this.label, required this.value, this.cijfers = false});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+      decoration: _kaartDecoratie(context, 16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            label,
+            style: TextStyle(
+              fontSize: 12,
+              color: CupertinoColors.secondaryLabel.resolveFrom(context),
+            ),
+          ),
+          const SizedBox(height: 3),
+          Text(
+            value,
+            style: TextStyle(
+              fontSize: 15,
+              fontWeight: FontWeight.w600,
+              color: CupertinoColors.label.resolveFrom(context),
+              fontFeatures: cijfers
+                  ? const [FontFeature.tabularFigures()]
+                  : null,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// De "Klus"-tegels: type service, ordernummer en de monteurs.
+class _KlusTegels extends StatelessWidget {
+  final ServiceOrder order;
+  final List<ServicePerson> monteurs;
+  final bool bezig;
+  final VoidCallback onToevoegen;
+  const _KlusTegels({
+    required this.order,
+    required this.monteurs,
+    required this.bezig,
+    required this.onToevoegen,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final tegels = <Widget>[
+      if (order.serviceType.isNotEmpty)
+        _Tegel(label: 'Type service', value: order.serviceType),
+      if (order.orderNumber.isNotEmpty)
+        _Tegel(label: 'Ordernummer', value: order.orderNumber, cijfers: true),
+    ];
+    if (tegels.isEmpty && monteurs.isEmpty) return const SizedBox.shrink();
+
+    final ring = AppColors.card.resolveFrom(context);
+    final tonen = monteurs.take(4).toList();
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 16),
+      child: Column(
+        children: [
+          // Een tegel die alleen op een rij staat pakt de volle breedte.
+          if (tegels.length == 2)
+            IntrinsicHeight(
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Expanded(child: tegels[0]),
+                  const SizedBox(width: 8),
+                  Expanded(child: tegels[1]),
+                ],
+              ),
+            )
+          else if (tegels.length == 1)
+            tegels[0],
+          if (tegels.isNotEmpty && monteurs.isNotEmpty)
+            const SizedBox(height: 8),
+          if (monteurs.isNotEmpty)
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+              decoration: _kaartDecoratie(context, 16),
+              child: Row(
+                children: [
+                  SizedBox(
+                    width: 32.0 + (tonen.length - 1) * 24,
+                    height: 32,
+                    child: Stack(
+                      children: [
+                        for (var i = 0; i < tonen.length; i++)
+                          Positioned(
+                            left: i * 24.0,
+                            child: _Avatar(
+                              tekst: _initialen(tonen[i].name),
+                              bg: _avatarKleuren[i % _avatarKleuren.length].$1,
+                              fg: _avatarKleuren[i % _avatarKleuren.length].$2,
+                              ring: ring,
+                            ),
+                          ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          monteurs.length > 1 ? 'Monteurs' : 'Monteur',
+                          style: TextStyle(
+                            fontSize: 12,
+                            color: CupertinoColors.secondaryLabel.resolveFrom(
+                              context,
+                            ),
+                          ),
+                        ),
+                        const SizedBox(height: 3),
+                        Text(
+                          monteurs.map((m) => m.name).join(', '),
+                          style: TextStyle(
+                            fontSize: 15,
+                            fontWeight: FontWeight.w600,
+                            color: CupertinoColors.label.resolveFrom(context),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  CupertinoButton(
+                    padding: EdgeInsets.zero,
+                    minimumSize: const Size(36, 36),
+                    onPressed: bezig ? null : onToevoegen,
+                    child: bezig
+                        ? const CupertinoActivityIndicator()
+                        : Container(
+                            width: 32,
+                            height: 32,
+                            decoration: BoxDecoration(
+                              shape: BoxShape.circle,
+                              color: AppColors.accent.withValues(alpha: 0.14),
+                            ),
+                            child: Icon(
+                              CupertinoIcons.person_add,
+                              size: 17,
+                              color: AppColors.accent,
+                            ),
+                          ),
+                  ),
+                ],
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+// ─── Object: onderdelen ────────────────────────────────────────────────────────
+
+/// Cel in het facts-grid van de objectkaart (Garantie, Volgend onderhoud...).
+class _FeitCel extends StatelessWidget {
+  final IconData icon;
+  final Color? iconKleur;
+  final String label;
+  final String value;
+
+  const _FeitCel({
+    required this.icon,
+    required this.label,
+    required this.value,
+    this.iconKleur,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final secundair = CupertinoColors.secondaryLabel.resolveFrom(context);
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      decoration: BoxDecoration(
+        color: AppColors.field.resolveFrom(context),
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(icon, size: 12, color: iconKleur ?? secundair),
+              const SizedBox(width: 5),
+              Flexible(
+                child: Text(
+                  label,
+                  style: TextStyle(fontSize: 12, color: secundair),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 3),
+          Text(
+            value,
+            style: TextStyle(
+              fontSize: 15,
+              fontWeight: FontWeight.w600,
+              color: CupertinoColors.label.resolveFrom(context),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Knop met vlakke achtergrond en een donkerder "ingedrukt"-stand.
+class _VlakKnop extends StatefulWidget {
+  final IconData icon;
+  final String label;
+  final VoidCallback onTap;
+
+  const _VlakKnop({
+    required this.icon,
+    required this.label,
+    required this.onTap,
+  });
+
+  @override
+  State<_VlakKnop> createState() => _VlakKnopState();
+}
+
+class _VlakKnopState extends State<_VlakKnop> {
+  bool _ingedrukt = false;
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: widget.onTap,
+      onTapDown: (_) => setState(() => _ingedrukt = true),
+      onTapUp: (_) => setState(() => _ingedrukt = false),
+      onTapCancel: () => setState(() => _ingedrukt = false),
+      behavior: HitTestBehavior.opaque,
+      child: Container(
+        padding: const EdgeInsets.symmetric(vertical: 9),
+        decoration: BoxDecoration(
+          color: _ingedrukt
+              ? AppColors.border.resolveFrom(context)
+              : AppColors.field.resolveFrom(context),
+          borderRadius: BorderRadius.circular(10),
+        ),
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(widget.icon, size: 16, color: AppColors.navy.resolveFrom(context)),
+            const SizedBox(width: 6),
+            Flexible(
+              child: Text(
+                widget.label,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  fontSize: 14,
+                  fontWeight: FontWeight.w500,
+                  color: CupertinoColors.label.resolveFrom(context),
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// ─── Adres & contact ───────────────────────────────────────────────────────────
+
+/// Ronde actieknop (36px) met een hit-area van 44px.
+class _RondeKnop extends StatelessWidget {
+  final Color kleur;
+  final IconData icon;
+  final VoidCallback onTap;
+
+  const _RondeKnop({
+    required this.kleur,
+    required this.icon,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onTap,
+      behavior: HitTestBehavior.opaque,
+      child: SizedBox(
+        width: 44,
+        height: 44,
+        child: Center(
+          child: Container(
+            width: 36,
+            height: 36,
+            decoration: BoxDecoration(color: kleur, shape: BoxShape.circle),
+            child: Icon(icon, size: 16, color: CupertinoColors.white),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Getekend kaartje als plaatsaanduiding met een pin in het midden. Het is
+/// bewust geen echte kaart: er zijn geen coördinaten van de bon, en een tik
+/// opent toch de navigatie-app met het adres.
+class _KaartPlaceholder extends StatelessWidget {
+  final VoidCallback onTap;
+  final Uint8List? image;
+  const _KaartPlaceholder({required this.onTap, this.image});
+
+  @override
+  Widget build(BuildContext context) {
+    final isDark = CupertinoTheme.brightnessOf(context) == Brightness.dark;
+    return GestureDetector(
+      onTap: onTap,
+      behavior: HitTestBehavior.opaque,
+      child: SizedBox(
+        height: 110,
+        width: double.infinity,
+        child: Stack(
+          alignment: Alignment.center,
+          children: [
+            Positioned.fill(
+              child: image != null
+                  ? Image.memory(
+                      image!,
+                      fit: BoxFit.cover,
+                      gaplessPlayback: true,
+                    )
+                  : CustomPaint(painter: _KaartPainter(isDark: isDark)),
+            ),
+            if (image != null)
+              Positioned(
+                right: 6,
+                bottom: 4,
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
+                  decoration: BoxDecoration(
+                    color: const Color(0xB3FFFFFF),
+                    borderRadius: BorderRadius.circular(3),
+                  ),
+                  child: const Text(
+                    'Powered by Geoapify · © OpenStreetMap',
+                    style: TextStyle(
+                      fontSize: 9,
+                      color: Color(0xFF3C3C43),
+                      decoration: TextDecoration.none,
+                    ),
+                  ),
+                ),
+              ),
+            Container(
+              width: 44,
+              height: 44,
+              decoration: const BoxDecoration(
+                shape: BoxShape.circle,
+                color: Color(0x40FF6B2B),
+              ),
+              alignment: Alignment.center,
+              child: Container(
+                width: 34,
+                height: 34,
+                decoration: const BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: AppColors.accent,
+                ),
+                child: const Icon(
+                  CupertinoIcons.map_pin,
+                  size: 16,
+                  color: CupertinoColors.white,
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _KaartPainter extends CustomPainter {
+  final bool isDark;
+  const _KaartPainter({required this.isDark});
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final grond = Paint()
+      ..color = isDark ? const Color(0xFF2A2E33) : const Color(0xFFE8EDF1);
+    canvas.drawRect(Offset.zero & size, grond);
+
+    final blok = Paint()
+      ..color = isDark ? const Color(0xFF30363B) : const Color(0xFFDDE7DD);
+    canvas.drawRRect(
+      RRect.fromRectAndRadius(
+        Rect.fromLTWH(size.width * 0.06, size.height * 0.12, size.width * 0.22, size.height * 0.34),
+        const Radius.circular(6),
+      ),
+      blok,
+    );
+    canvas.drawRRect(
+      RRect.fromRectAndRadius(
+        Rect.fromLTWH(size.width * 0.70, size.height * 0.58, size.width * 0.24, size.height * 0.30),
+        const Radius.circular(6),
+      ),
+      blok,
+    );
+
+    final weg = Paint()
+      ..color = isDark ? const Color(0xFF3A4046) : const Color(0xFFFFFFFF)
+      ..style = PaintingStyle.stroke
+      ..strokeCap = StrokeCap.butt;
+    weg.strokeWidth = 9;
+    canvas.drawLine(
+      Offset(0, size.height * 0.62),
+      Offset(size.width, size.height * 0.40),
+      weg,
+    );
+    weg.strokeWidth = 6;
+    canvas.drawLine(
+      Offset(size.width * 0.38, 0),
+      Offset(size.width * 0.52, size.height),
+      weg,
+    );
+    weg.strokeWidth = 4;
+    canvas.drawLine(
+      Offset(size.width * 0.05, size.height * 0.92),
+      Offset(size.width * 0.62, size.height * 0.78),
+      weg,
+    );
+  }
+
+  @override
+  bool shouldRepaint(_KaartPainter old) => old.isDark != isDark;
+}
+
+/// De "Adres & contact"-kaart: kaartje, adres met route-knop en het
+/// contact met een belknop.
+class _AdresKaart extends StatelessWidget {
+  final String locationName;
+  final String? address;
+  final String? contactName;
+  final String? contactPhone;
+  final MapSnapshot? kaart;
+  final VoidCallback onMaps;
+  final VoidCallback onCall;
+
+  const _AdresKaart({
+    required this.locationName,
+    required this.address,
+    required this.contactName,
+    required this.contactPhone,
+    required this.kaart,
+    required this.onMaps,
+    required this.onCall,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final secundair = CupertinoColors.secondaryLabel.resolveFrom(context);
+    final label = CupertinoColors.label.resolveFrom(context);
+    final rand = AppColors.border.resolveFrom(context);
+    final heeftContact = contactName != null || contactPhone != null;
+
+    return Container(
+      margin: const EdgeInsets.symmetric(horizontal: 16),
+      clipBehavior: Clip.antiAlias,
+      decoration: _kaartDecoratie(context, 16),
+      child: Column(
+        children: [
+          _KaartPlaceholder(onTap: onMaps, image: kaart?.image),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(14, 4, 6, 4),
+            child: Row(
+              children: [
+                Expanded(
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 8),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          locationName,
+                          style: TextStyle(
+                            fontSize: 15,
+                            fontWeight: FontWeight.w600,
+                            color: label,
+                          ),
+                        ),
+                        if (address != null && address!.isNotEmpty) ...[
+                          const SizedBox(height: 2),
+                          Text(
+                            address!,
+                            maxLines: 2,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(fontSize: 13, color: secundair),
+                          ),
+                        ],
+                      ],
+                    ),
+                  ),
+                ),
+                _RondeKnop(
+                  kleur: AppColors.accent,
+                  icon: CupertinoIcons.location_fill,
+                  onTap: onMaps,
+                ),
+              ],
+            ),
+          ),
+          if (heeftContact) ...[
+            Container(
+              height: 0.5,
+              margin: const EdgeInsets.symmetric(horizontal: 14),
+              color: rand,
+            ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(14, 4, 6, 4),
+              child: Row(
+                children: [
+                  _Avatar(
+                    tekst: contactName != null ? _initialen(contactName!) : '#',
+                    bg: const Color(0xFFE6F9EC),
+                    fg: const Color(0xFF248A3D),
+                    size: 36,
+                    fontSize: 13,
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 8),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            contactName ?? contactPhone!,
+                            style: TextStyle(
+                              fontSize: 15,
+                              fontWeight: FontWeight.w500,
+                              color: label,
+                            ),
+                          ),
+                          if (contactName != null && contactPhone != null) ...[
+                            const SizedBox(height: 2),
+                            Text(
+                              contactPhone!,
+                              style: TextStyle(fontSize: 13, color: secundair),
+                            ),
+                          ],
+                        ],
+                      ),
+                    ),
+                  ),
+                  if (contactPhone != null)
+                    _RondeKnop(
+                      kleur: const Color(0xFF34C759),
+                      icon: CupertinoIcons.phone_fill,
+                      onTap: onCall,
+                    ),
+                ],
+              ),
+            ),
+          ],
+        ],
+      ),
     );
   }
 }
@@ -1566,10 +2740,10 @@ class _ErrorView extends StatelessWidget {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            const Icon(
+            Icon(
               CupertinoIcons.exclamationmark_circle,
               size: 44,
-              color: CupertinoColors.systemRed,
+              color: CupertinoColors.systemRed.resolveFrom(context),
             ),
             const SizedBox(height: 12),
             Text(error, textAlign: TextAlign.center),

@@ -4,6 +4,7 @@ import 'package:flutter/cupertino.dart';
 
 import '../data/planning_repository.dart';
 import '../models/job_order.dart';
+import '../../../core/theme/app_colors.dart';
 
 class PartsSearchScreen extends StatefulWidget {
   final ServiceOrder order;
@@ -71,17 +72,17 @@ class _PartsSearchScreenState extends State<PartsSearchScreen> {
 
     return CupertinoPageScaffold(
       navigationBar: CupertinoNavigationBar(
-        backgroundColor: CupertinoColors.white,
+        backgroundColor: AppColors.navBar,
         border: null,
         leading: CupertinoNavigationBarBackButton(
-          color: CupertinoColors.black,
+          color: AppColors.navForeground,
           onPressed: () => Navigator.of(context).pop(),
         ),
-        middle: const Text(
+        middle: Text(
           'Onderdelen',
           style: TextStyle(
             fontWeight: FontWeight.w600,
-            color: CupertinoColors.black,
+            color: AppColors.navForeground.resolveFrom(context),
           ),
         ),
       ),
@@ -246,13 +247,15 @@ class _PartCard extends StatelessWidget {
               child: Container(
                 padding: const EdgeInsets.all(6),
                 decoration: BoxDecoration(
-                  color: CupertinoColors.activeBlue.withValues(alpha: 0.12),
+                  color: CupertinoColors.activeBlue
+                      .resolveFrom(context)
+                      .withValues(alpha: 0.12),
                   shape: BoxShape.circle,
                 ),
-                child: const Icon(
+                child: Icon(
                   CupertinoIcons.plus,
                   size: 18,
-                  color: CupertinoColors.activeBlue,
+                  color: CupertinoColors.activeBlue.resolveFrom(context),
                 ),
               ),
             ),
