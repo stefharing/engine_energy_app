@@ -77,10 +77,10 @@ class AuthService {
     isLoggedInListenable.value = isLoggedIn;
   }
 
-  /// In debug-builds blijft de oude medewerkerskeuze werken (zonder
+  /// Zolang de oude medewerkerskeuze aanstaat blijft die werken (zonder
   /// Microsoft-sessie, dus zonder gedeelde tussenopslag).
   bool get _hasMicrosoftSession =>
-      kDebugMode ||
+      MicrosoftAuthConfig.medewerkerskeuzeTonen ||
       !MicrosoftAuthConfig.enabled || !FirebaseBootstrap.isReady || FirebaseBootstrap.isSignedIn;
 
   /// Logt in met het Microsoft-werkaccount en zoekt de bijbehorende monteur

@@ -1,5 +1,4 @@
 import 'package:flutter/cupertino.dart';
-import 'package:flutter/foundation.dart' show kDebugMode;
 
 import '../core/api/api_client.dart';
 import '../core/api/api_config.dart';
@@ -22,10 +21,11 @@ class LoginScreen extends StatefulWidget {
 class _LoginScreenState extends State<LoginScreen> {
   List<Employee>? _employees;
   Employee? _selected;
-  // De medewerkerskeuze is er in debug-builds en zolang Microsoft-login
-  // uitstaat (MicrosoftAuthConfig.enabled).
+  // De medewerkerskeuze is er alleen als MicrosoftAuthConfig
+  // .medewerkerskeuzeTonen aanstaat, of zolang Microsoft-login uitstaat.
   static bool get _toonMedewerkers =>
-      kDebugMode || !MicrosoftAuthConfig.enabled;
+      MicrosoftAuthConfig.medewerkerskeuzeTonen ||
+      !MicrosoftAuthConfig.enabled;
   bool _loadingEmployees = false;
   bool _submitting = false;
   String? _error;
@@ -261,7 +261,7 @@ class _LoginScreenState extends State<LoginScreen> {
                         SizedBox(height: MicrosoftAuthConfig.enabled ? 40 : 0),
                         Text(
                           MicrosoftAuthConfig.enabled
-                              ? 'Alleen debug: kies een monteur'
+                              ? 'Ontwikkeling: kies een monteur'
                               : 'Kies je naam om in te loggen.',
                           textAlign: TextAlign.center,
                           style: TextStyle(
